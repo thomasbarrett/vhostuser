@@ -24,7 +24,7 @@ typedef struct bdev {
     char id[BDEV_MAX_ID_LEN];
 } bdev_t;
 
-io_queue_t* mock_io_queue_create();
+io_queue_t* mock_io_queue_create(void);
 void mock_io_queue_destroy(io_queue_t *queue);
 
 #endif

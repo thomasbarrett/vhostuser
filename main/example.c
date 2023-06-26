@@ -193,7 +193,7 @@ void vhost_user_device_init(vhost_user_device_t *dev) {
     }
 }
 
-int vhost_user_device_handle_message(vhost_user_device_t *dev, vhost_user_message_t *msg, int *fd);
+int vhost_user_device_message(vhost_user_device_t *dev, vhost_user_message_t *msg, int *fd);
 
 int main() {
     int sockfd = socket(PF_UNIX, SOCK_STREAM, 0);
@@ -264,7 +264,7 @@ int main() {
 
         vhost_user_message_t *msg = (vhost_user_message_t*) (&buf);
         size_t msg_size = VHOST_USER_HEADER_SIZE + msg->header.size;
-        vhost_user_device_handle_message(&vhost_user_device, msg, &fd);
+        vhost_user_device_message(&vhost_user_device, msg, &fd);
         memmove(buf, &buf[msg_size], nread - msg_size);
         nread -= msg_size;
     }
@@ -274,13 +274,22 @@ int main() {
 	return 0;
 }
 
-int vhost_user_device_handle_set_owner(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_write(vhost_user_device_t *dev, vhost_user_message_t *resp) {
+    size_t msg_size = VHOST_USER_HEADER_SIZE + resp->header.size;
+    if (write(dev->client_fd, resp, msg_size) < msg_size) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int vhost_user_device_set_owner(vhost_user_device_t *dev, vhost_user_message_t *req) {
     if (dev->owned) return -1;    
     dev->owned = 1;
     return 0;
 }
 
-int vhost_user_device_handle_reset_owner(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_reset_owner(vhost_user_device_t *dev, vhost_user_message_t *req) {
     dev->owned = 0;
     dev->acked_features = 0;
     dev->acked_protocol_features = 0;
@@ -288,7 +297,7 @@ int vhost_user_device_handle_reset_owner(vhost_user_device_t *dev, vhost_user_me
     return 0;
 }
 
-int vhost_user_device_handle_get_features(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_get_features(vhost_user_device_t *dev, vhost_user_message_t *req) {
     vhost_user_message_t resp = {0};
     resp.header.flags = VHOST_USER_HEADER_FLAGS_V1 | VHOST_USER_HEADER_FLAGS_REPLY;
     resp.header.size = sizeof(uint64_t);
@@ -297,16 +306,14 @@ int vhost_user_device_handle_get_features(vhost_user_device_t *dev, vhost_user_m
                     1ULL << VHOST_USER_F_PROTOCOL_FEATURES |
                     1ULL << VIRTIO_BLK_F_MQ;
 
-    size_t msg_size = VHOST_USER_HEADER_SIZE + resp.header.size;
-    if (write(dev->client_fd, &resp, msg_size) < msg_size) {
-        perror("ERROR: Failed to write");
-        exit(1);
+    if (vhost_user_write(dev, &resp) < 0) {
+        return -1;
     }
 
     return 0;
 }
 
-int vhost_user_device_handle_set_features(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_set_features(vhost_user_device_t *dev, vhost_user_message_t *req) {
     dev->acked_features = req->body.u64;
     dev->features_acked = 1;
     if ((dev->acked_features & VHOST_USER_F_PROTOCOL_FEATURES) == 0) {
@@ -316,7 +323,7 @@ int vhost_user_device_handle_set_features(vhost_user_device_t *dev, vhost_user_m
     return 0;
 }
 
-int vhost_user_device_handle_get_protocol_features(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_get_protocol_features(vhost_user_device_t *dev, vhost_user_message_t *req) {
     vhost_user_message_t resp = {0};
     resp.header.flags = VHOST_USER_HEADER_FLAGS_V1 | VHOST_USER_HEADER_FLAGS_REPLY;
     resp.header.size = sizeof(uint64_t);
@@ -325,85 +332,80 @@ int vhost_user_device_handle_get_protocol_features(vhost_user_device_t *dev, vho
                     1ULL << VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS |
                     1ULL << VHOST_USER_PROTOCOL_F_MQ;
 
-    if (write(dev->client_fd, &resp, VHOST_USER_HEADER_SIZE + resp.header.size) < VHOST_USER_HEADER_SIZE + resp.header.size) {
-        perror("failed to write response");
-        exit(1);
+    if (vhost_user_write(dev, &resp) < 0) {
+        return -1;
     }
 
     return 0;
 }
 
-int vhost_user_device_handle_set_protocol_features(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_set_protocol_features(vhost_user_device_t *dev, vhost_user_message_t *req) {
     dev->protocol_features = req->body.u64;
 
     return 0;
 }
 
-int vhost_user_device_handle_get_queue_num(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_get_queue_num(vhost_user_device_t *dev, vhost_user_message_t *req) {
     vhost_user_message_t resp = {0};
     resp.header.flags = VHOST_USER_HEADER_FLAGS_V1 | VHOST_USER_HEADER_FLAGS_REPLY;
     resp.header.size = sizeof(uint64_t);
     resp.header.request = req->header.request;
     resp.body.u64 = DEVICE_QUEUE_COUNT;
 
-    if (write(dev->client_fd, &resp, VHOST_USER_HEADER_SIZE + resp.header.size) < VHOST_USER_HEADER_SIZE + resp.header.size) {
-        perror("failed to write response");
-        exit(1);
+    if (vhost_user_write(dev, &resp) < 0) {
+        return -1;
     }
 
     return 0;
 }
 
-int vhost_user_device_handle_get_max_mem_slots(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_get_max_mem_slots(vhost_user_device_t *dev, vhost_user_message_t *req) {
     vhost_user_message_t resp = {0};
     resp.header.flags = VHOST_USER_HEADER_FLAGS_V1 | VHOST_USER_HEADER_FLAGS_REPLY;
     resp.header.size = sizeof(uint64_t);
     resp.header.request = req->header.request;
     resp.body.u64 = 32;
 
-    if (write(dev->client_fd, &resp, VHOST_USER_HEADER_SIZE + resp.header.size) < VHOST_USER_HEADER_SIZE + resp.header.size) {
-        perror("failed to write response");
-        exit(1);
+    if (vhost_user_write(dev, &resp) < 0) {
+        return -1;
     }
 
     return 0;
 }
 
-int vhost_user_device_handle_set_vring_call(vhost_user_device_t *dev, vhost_user_message_t *req, int *fd) {
-    uint8_t vring_index = (uint8_t) req->body.u64;
-    assert(vring_index >= 0 && vring_index < DEVICE_QUEUE_COUNT);
+int vhost_user_device_set_vring_call(vhost_user_device_t *dev, vhost_user_message_t *req, int *fd) {
+    uint8_t index = (uint8_t) req->body.u64;
+    assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
     uint64_t invalid_fd = (req->body.u64 >> 8) & 0x1;
     assert(invalid_fd == 0);
 
-    if (dev->queues[vring_index].call_eventfd != -1) {
-        printf("DEBUG: closing call eventfd %d\n", dev->queues[vring_index].call_eventfd);
-        close(dev->queues[vring_index].call_eventfd);
+    if (dev->queues[index].call_eventfd != -1) {
+        close(dev->queues[index].call_eventfd);
     }
 
-    dev->queues[vring_index].call_eventfd = *fd;
+    dev->queues[index].call_eventfd = *fd;
     *fd = -1;
-    write(dev->queues[vring_index].call_eventfd, &(uint64_t){1}, sizeof(uint64_t));
+    write(dev->queues[index].call_eventfd, &(uint64_t){1}, sizeof(uint64_t));
     return 0;
 }
 
-int vhost_user_device_handle_set_vring_err(vhost_user_device_t *dev, vhost_user_message_t *req, int *fd) {
-    uint8_t vring_index = (uint8_t) req->body.u64;
-    assert(vring_index >= 0 && vring_index < DEVICE_QUEUE_COUNT);
+int vhost_user_device_set_vring_err(vhost_user_device_t *dev, vhost_user_message_t *req, int *fd) {
+    uint8_t index = (uint8_t) req->body.u64;
+    assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
     uint64_t invalid_fd = (req->body.u64 >> 8) & 0x1;
     assert(invalid_fd == 0);
 
-    if (dev->queues[vring_index].err_eventfd != -1) {
-        printf("DEBUG: closing err eventfd %d\n", dev->queues[vring_index].err_eventfd);
-        close(dev->queues[vring_index].err_eventfd);
+    if (dev->queues[index].err_eventfd != -1) {
+        close(dev->queues[index].err_eventfd);
     }
 
-    dev->queues[vring_index].err_eventfd = *fd;
+    dev->queues[index].err_eventfd = *fd;
     *fd = -1;
 
     return 0;
 }
 
-int vhost_user_device_handle_get_config(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_get_config(vhost_user_device_t *dev, vhost_user_message_t *req) {
     uint8_t buffer[4096] = {0};
     vhost_user_message_t *resp = (vhost_user_message_t *) buffer;
     resp->header.flags = VHOST_USER_HEADER_FLAGS_V1 | VHOST_USER_HEADER_FLAGS_REPLY;
@@ -412,71 +414,69 @@ int vhost_user_device_handle_get_config(vhost_user_device_t *dev, vhost_user_mes
     resp->body.config.offset = req->body.config.offset;
     resp->body.config.size = req->body.config.size;
     memcpy(&resp->body.config + 1, &((uint8_t*) &dev->config)[req->body.config.offset], req->body.config.size);
-    if (write(dev->client_fd, resp, VHOST_USER_HEADER_SIZE + resp->header.size) < VHOST_USER_HEADER_SIZE + resp->header.size) {
-        perror("failed to write response");
-        exit(1);
+    if (vhost_user_write(dev, resp) < 0) {
+        return -1;
     }
 
 
     return 0;
 }
 
-int vhost_user_device_handle_set_vring_num(vhost_user_device_t *dev, vhost_user_message_t *req) {
-    size_t vring_index = req->body.state.index;
-    assert(vring_index >= 0 && vring_index < DEVICE_QUEUE_COUNT);
-    dev->queues[vring_index].vring.num = req->body.state.num;
+int vhost_user_device_set_vring_num(vhost_user_device_t *dev, vhost_user_message_t *req) {
+    size_t index = req->body.state.index;
+    assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
+    dev->queues[index].vring.num = req->body.state.num;
     return 0;
 }
 
-int vhost_user_device_handle_set_vring_base(vhost_user_device_t *dev, vhost_user_message_t *req) {
-    size_t vring_index = req->body.state.index;
-    assert(vring_index >= 0 && vring_index < DEVICE_QUEUE_COUNT);
-    dev->queues[vring_index].base_offset = req->body.state.num;
+int vhost_user_device_set_vring_base(vhost_user_device_t *dev, vhost_user_message_t *req) {
+    size_t index = req->body.state.index;
+    assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
+    dev->queues[index].base_offset = req->body.state.num;
     return 0;
 }
 
-
-int vhost_user_device_handle_set_vring_addr(vhost_user_device_t *dev, vhost_user_message_t *req) {
+int vhost_user_device_set_vring_addr(vhost_user_device_t *dev, vhost_user_message_t *req) {
     struct vhost_vring_addr *vra = &req->body.addr;
     unsigned int index = vra->index;
     assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
     dev->queues[index].flags = vra->flags;
 
-    vhost_vring_addr_debug(vra);
-
     int res;
-    if ((res = guest_memory_user_to_mmap(&guest_memory, vra->desc_user_addr, (void**) &dev->queues[index].vring.desc)) < 0) {
-        printf("ERROR: failed to translate user address to mmap address: %016llx\n", vra->desc_user_addr);
+    res = guest_memory_user_to_mmap(&guest_memory, vra->desc_user_addr, (void**) &dev->queues[index].vring.desc);
+    if (res < 0) {
+        printf("ERROR: failed to translate user address to mmap address: 0x%016llx\n", vra->desc_user_addr);
         return res;
     }
     
-    if ((res = guest_memory_user_to_mmap(&guest_memory, vra->used_user_addr,(void**) &dev->queues[index].vring.used)) < 0) {
-        printf("ERROR: failed to translate user address to mmap address: %016llx\n", vra->used_user_addr);
+    res = guest_memory_user_to_mmap(&guest_memory, vra->used_user_addr,(void**) &dev->queues[index].vring.used);
+    if (res < 0) {
+        printf("ERROR: failed to translate user address to mmap address: 0x%016llx\n", vra->used_user_addr);
         return res;
     }
 
-    if ((res = guest_memory_user_to_mmap(&guest_memory, vra->avail_user_addr, (void**) &dev->queues[index].vring.avail)) < 0) {
-        printf("ERROR: failed to translate user address to mmap address: %016llx\n", vra->avail_user_addr);
+    res = guest_memory_user_to_mmap(&guest_memory, vra->avail_user_addr, (void**) &dev->queues[index].vring.avail);
+    if (res < 0) {
+        printf("ERROR: failed to translate user address to mmap address: 0x%016llx\n", vra->avail_user_addr);
         return res;
     }
 
     return 0;
 }
 
-int vhost_user_device_handle_set_vring_kick(vhost_user_device_t *dev, vhost_user_message_t *req, int *fd) {
-    uint8_t vring_index = (uint8_t) req->body.u64;
-    assert(vring_index >= 0 && vring_index < DEVICE_QUEUE_COUNT);
+int vhost_user_device_set_vring_kick(vhost_user_device_t *dev, vhost_user_message_t *req, int *fd) {
+    uint8_t index = (uint8_t) req->body.u64;
+    assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
     uint64_t invalid_fd = (req->body.u64 >> 8) & 0x1;
     assert(invalid_fd == 0);
 
-    if (dev->queues[vring_index].kick_eventfd != -1) {
-        printf("DEBUG: closing kick eventfd %d\n", dev->queues[vring_index].kick_eventfd);
-        close(dev->queues[vring_index].kick_eventfd);
+    if (dev->queues[index].kick_eventfd != -1) {
+        close(dev->queues[index].kick_eventfd);
     }
-    dev->queues[vring_index].kick_eventfd = *fd;
+    dev->queues[index].kick_eventfd = *fd;
 
-    dev->queues[vring_index].done = 0;
-    int res = pthread_create(&dev->queues[vring_index].thread_id, NULL, virt_queue_run, &dev->queues[vring_index]);
+    dev->queues[index].done = 0;
+    int res = pthread_create(&dev->queues[index].thread_id, NULL, virt_queue_run, &dev->queues[index]);
     if (res != 0) {
         perror("failed to create thread");
         exit(1);
@@ -486,97 +486,89 @@ int vhost_user_device_handle_set_vring_kick(vhost_user_device_t *dev, vhost_user
     return 0;
 }
 
-int vhost_user_device_handle_get_vring_base(vhost_user_device_t *dev, vhost_user_message_t *req) {
-    size_t vring_index = req->body.state.index;
-    assert(vring_index >= 0 && vring_index < DEVICE_QUEUE_COUNT);
+int vhost_user_device_get_vring_base(vhost_user_device_t *dev, vhost_user_message_t *req) {
+    size_t index = req->body.state.index;
+    assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
 
     vhost_user_message_t resp = {0};
     resp.header.flags = VHOST_USER_HEADER_FLAGS_V1 | VHOST_USER_HEADER_FLAGS_REPLY;
     resp.header.size = sizeof(struct vhost_vring_state);
     resp.header.request = req->header.request;
-    resp.body.state.index = vring_index;
-    resp.body.state.num = dev->queues[vring_index].base_offset;
+    resp.body.state.index = index;
+    resp.body.state.num = dev->queues[index].base_offset;
 
-    dev->queues[vring_index].done = 1;
-    pthread_join(dev->queues[vring_index].thread_id, NULL);
-    dev->queues[vring_index].state = QUEUE_STATE_STOPPED;
-    if (write(dev->client_fd, &resp, VHOST_USER_HEADER_SIZE + resp.header.size) < VHOST_USER_HEADER_SIZE + resp.header.size) {
-        perror("failed to write response");
-        exit(1);
+    dev->queues[index].done = 1;
+    pthread_join(dev->queues[index].thread_id, NULL);
+    dev->queues[index].state = QUEUE_STATE_STOPPED;
+    
+    if (vhost_user_write(dev, &resp) < 0) {
+        return -1;
     }
 
-    
     return 0;
 }
 
-int vhost_user_device_handle_set_vring_enable(vhost_user_device_t *dev, vhost_user_message_t *req) {
-    size_t vring_index = req->body.state.index;
-    assert(vring_index >= 0 && vring_index < DEVICE_QUEUE_COUNT);
-    virt_queue_t *queue = &dev->queues[vring_index];
+int vhost_user_device_set_vring_enable(vhost_user_device_t *dev, vhost_user_message_t *req) {
+    size_t index = req->body.state.index;
+    assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
+    virt_queue_t *queue = &dev->queues[index];
     if (queue->state == QUEUE_STATE_STOPPED) {
         printf("ERROR: attempt to (dis/en)nable stopped virt queue\n");
         return -1;
     }
 
-    dev->queues[vring_index].state = req->body.state.num;
+    dev->queues[index].state = req->body.state.num;
     
     return 0;
 }
 
-int vhost_user_device_handle_add_memory_region(vhost_user_device_t *dev, vhost_user_message_t *req, int *fd) {
+int vhost_user_device_add_memory_region(vhost_user_device_t *dev, vhost_user_message_t *req, int *fd) {
     memory_region_desc_t *desc = (memory_region_desc_t *) &req->body.single_region_desc.desc;
-
-    int res = guest_memory_region_init(&guest_memory.regions[guest_memory.regions_len++], *fd, desc->size, desc->mmap_offset, desc->guest_addr, desc->user_addr);
-    if (res < 0) {
-        printf("ERROR: failed to map memory region\n");
-        return -1;
-    }
+    int res = guest_memory_add_region(&guest_memory, *fd, desc->size,  desc->mmap_offset, desc->guest_addr, desc->user_addr);
     *fd = -1;
-
-    return 0;
+    return res;
 }
 
-int vhost_user_device_handle_message(vhost_user_device_t *dev, vhost_user_message_t *msg, int *fd) {
-    printf("INFO: recv %s: fd %d\n", vhost_user_message_type_str(msg->header.request), *fd);
+int vhost_user_device_message(vhost_user_device_t *dev, vhost_user_message_t *msg, int *fd) {
     switch (msg->header.request) {
     case VHOST_USER_SET_OWNER:
-        return vhost_user_device_handle_set_owner(dev, msg);
+        return vhost_user_device_set_owner(dev, msg);
     case VHOST_USER_RESET_OWNER:
-        return vhost_user_device_handle_reset_owner(dev, msg);
+        return vhost_user_device_reset_owner(dev, msg);
     case VHOST_USER_GET_FEATURES:
-        return vhost_user_device_handle_get_features(dev, msg);
+        return vhost_user_device_get_features(dev, msg);
     case VHOST_USER_SET_FEATURES:
-        return vhost_user_device_handle_set_features(dev, msg);
+        return vhost_user_device_set_features(dev, msg);
     case VHOST_USER_GET_PROTOCOL_FEATURES:
-        return vhost_user_device_handle_get_protocol_features(dev, msg);
+        return vhost_user_device_get_protocol_features(dev, msg);
     case VHOST_USER_SET_PROTOCOL_FEATURES:
-        return vhost_user_device_handle_set_protocol_features(dev, msg);
+        return vhost_user_device_set_protocol_features(dev, msg);
     case VHOST_USER_GET_QUEUE_NUM:
-        return vhost_user_device_handle_get_queue_num(dev, msg);
+        return vhost_user_device_get_queue_num(dev, msg);
     case VHOST_USER_GET_MAX_MEM_SLOTS:
-        return vhost_user_device_handle_get_max_mem_slots(dev, msg);
+        return vhost_user_device_get_max_mem_slots(dev, msg);
     case VHOST_USER_SET_VRING_CALL:
-        return vhost_user_device_handle_set_vring_call(dev, msg, fd);
+        return vhost_user_device_set_vring_call(dev, msg, fd);
     case VHOST_USER_SET_VRING_ERR:
-        return vhost_user_device_handle_set_vring_err(dev, msg, fd);
+        return vhost_user_device_set_vring_err(dev, msg, fd);
     case VHOST_USER_GET_CONFIG:
-        return vhost_user_device_handle_get_config(dev, msg);
+        return vhost_user_device_get_config(dev, msg);
      case VHOST_USER_SET_VRING_NUM:
-        return vhost_user_device_handle_set_vring_num(dev, msg);
+        return vhost_user_device_set_vring_num(dev, msg);
     case VHOST_USER_SET_VRING_BASE:
-        return vhost_user_device_handle_set_vring_base(dev, msg);
+        return vhost_user_device_set_vring_base(dev, msg);
     case VHOST_USER_SET_VRING_ADDR:
-        return vhost_user_device_handle_set_vring_addr(dev, msg);
+        return vhost_user_device_set_vring_addr(dev, msg);
     case VHOST_USER_SET_VRING_KICK:
-        return vhost_user_device_handle_set_vring_kick(dev, msg, fd);
+        return vhost_user_device_set_vring_kick(dev, msg, fd);
     case VHOST_USER_GET_VRING_BASE:
-        return vhost_user_device_handle_get_vring_base(dev, msg);
+        return vhost_user_device_get_vring_base(dev, msg);
     case VHOST_USER_SET_VRING_ENABLE:
-        return vhost_user_device_handle_set_vring_enable(dev, msg);
+        return vhost_user_device_set_vring_enable(dev, msg);
     case VHOST_USER_ADD_MEM_REG:
-        return vhost_user_device_handle_add_memory_region(dev, msg, fd);
+        return vhost_user_device_add_memory_region(dev, msg, fd);
     default:
-        printf("not implemented: %s\n", vhost_user_message_type_str(msg->header.request));
+        printf("ERROR: not implemented: %s\n", vhost_user_message_type_str(msg->header.request));
         return -1;
     }
 }

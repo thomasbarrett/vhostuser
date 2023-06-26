@@ -13,6 +13,11 @@ void guest_memory_deinit(guest_memory_t *mem) {
     mem->regions_len = 0;
 }
 
+int guest_memory_add_region(guest_memory_t *mem, int fd, uint64_t size, uint64_t mmap_offset, uint64_t guest_addr, uint64_t user_addr) {
+    if (mem->regions_len == MAX_GUEST_MEMORY_REGIONS) return -1;
+    return guest_memory_region_init(&mem->regions[mem->regions_len++], fd, size, mmap_offset, guest_addr, user_addr);
+}
+
 int guest_memory_region_init(guest_memory_region_t *reg, int fd, uint64_t size, uint64_t mmap_offset, uint64_t guest_addr, uint64_t user_addr) {
     reg->fd = fd;
     reg->addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mmap_offset);
