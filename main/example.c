@@ -14,6 +14,7 @@
 #include <bdev.h>
 #include <virtio-core.h>
 #include <virtio-blk.h>
+#include <log.h>
 
 #include <sys/epoll.h>
 #include <linux/virtio_config.h>
@@ -49,6 +50,41 @@ typedef struct virt_queue {
     uint32_t last_avail_idx;
 } virt_queue_t;
 
+int virt_queue_read_desc_direct(guest_memory_t *mem, vring_desc_t *desc, struct iovec *iov, size_t i, size_t n) {
+    if (i >= n) return -1;
+    iov[i].iov_len = desc->len;
+    if (guest_memory_guest_to_addr(mem, desc->addr, (void**) &iov[i].iov_base) < 0) {
+        return -1;
+    }
+
+    return 1;
+}
+
+int virt_queue_read_desc_indirect(guest_memory_t *mem, vring_desc_t *desc, struct iovec *iov, size_t i, size_t n) {
+    size_t iter = i;
+
+    vring_desc_t *indirect_desc_table;
+    if (guest_memory_guest_to_addr(mem, desc->addr, (void **) &indirect_desc_table) < 0) {
+        return -1;
+    }
+
+    for (size_t j = 0; j < desc->len / sizeof(vring_desc_t); j++) {
+        int res = virt_queue_read_desc_direct(mem, &indirect_desc_table[j], iov, iter, n);
+        if (res < 0) return -1;
+        iter += res;
+    }
+    
+    return iter - i;
+}
+
+int virt_queue_read_desc(guest_memory_t *mem, vring_desc_t *desc, struct iovec *iov, size_t i, size_t n) {
+    if (desc->flags & VRING_DESC_F_INDIRECT) {
+        return virt_queue_read_desc_indirect(mem, desc, iov, i, n);
+    } else {
+        return virt_queue_read_desc_direct(mem, desc, iov, i, n);
+    }
+}
+
 int virt_queue_poll(virt_queue_t *queue) {
     // The back-end must start ring upon receiving a kick.
     if (queue->state == QUEUE_STATE_STOPPED) {
@@ -65,47 +101,40 @@ int virt_queue_poll(virt_queue_t *queue) {
 
     while(queue->vring.avail->idx != queue->last_avail_idx) {
         atomic_thread_fence(memory_order_acquire);
-        uint32_t buffer_id = queue->vring.avail->ring[queue->last_avail_idx++ % queue->vring.num];
-        struct iovec iov[128];
+        uint32_t id = queue->vring.avail->ring[queue->last_avail_idx++ % queue->vring.num];
+        struct iovec iov[130];
 
-        size_t j = 0;
-        uint32_t iter = buffer_id;
-        while (queue->vring.desc[iter].flags & VRING_DESC_F_NEXT) {
-            if (j == queue->vring.num) {
-                printf("ERROR: invalid next\n");
+        size_t len = 0;
+        uint32_t i = id;        
+        while (queue->vring.desc[i].flags & VRING_DESC_F_NEXT) {
+            int res = virt_queue_read_desc(&guest_memory, &queue->vring.desc[i], iov, len, 130);
+            if (res < 0) {
+                error("failed to read desc");
                 return -1;
             }
+            len += res;
 
-            size_t index = j++;
-            iov[index].iov_len = queue->vring.desc[iter].len;
-
-            if (guest_memory_guest_to_addr(&guest_memory, queue->vring.desc[iter].addr, (void**) &iov[index].iov_base) < 0) {
-                printf("ERROR: failed to translate guest address to mmap address\n");
-                return -1;
-            }
-
-
-            iter = queue->vring.desc[iter].next;
-            if (iter >= queue->vring.num) {
-                printf("ERROR: invalid next\n");
+            i = queue->vring.desc[i].next;
+            if (i >= queue->vring.num) {
+                error("invalid next buffer id");
                 return -1;
             }
         }
-        size_t index = j++;
-        iov[index].iov_len = queue->vring.desc[iter].len;
-        if (guest_memory_guest_to_addr(&guest_memory, queue->vring.desc[iter].addr, (void**) &iov[index].iov_base) < 0) {
-            printf("ERROR: failed to translate guest address to mmap address\n");
+        int res = virt_queue_read_desc(&guest_memory, &queue->vring.desc[i], iov, len, 130);
+        if (res < 0) {
+            error("failed to read desc");
             return -1;
         }
+        len += res;
 
         virtio_ctx_t *virtio_ctx = calloc(1, sizeof(virtio_ctx_t));
         virtio_ctx->vring = queue->vring;
-        virtio_ctx->id = buffer_id;
-        virtio_ctx->len = j;
+        virtio_ctx->id = id;
+        virtio_ctx->len = len;
         virtio_ctx->eventfd = queue->call_eventfd;
 
         struct virtio_blk_outhdr* hdr = (struct virtio_blk_outhdr*) iov[0].iov_base;
-        virtio_blk_handle(queue->io_queue, hdr, iov, (uint8_t*) iov[j - 1].iov_base, virtio_ctx);
+        virtio_blk_handle(queue->io_queue, hdr, iov, (uint8_t*) iov[len - 1].iov_base, virtio_ctx);
     }
 
     return 0;
@@ -187,7 +216,8 @@ void vhost_user_device_init(vhost_user_device_t *dev) {
     memset(dev, 0, sizeof(vhost_user_device_t));
     dev->config.capacity = 2097152;
     dev->config.num_queues = 4;
-
+    dev->config.size_max = 16384;
+    dev->config.seg_max = 128;
     for (size_t i = 0; i < DEVICE_QUEUE_COUNT; i++) {
         virt_queue_init(&dev->queues[i], i);
     }
@@ -303,8 +333,11 @@ int vhost_user_device_get_features(vhost_user_device_t *dev, vhost_user_message_
     resp.header.size = sizeof(uint64_t);
     resp.header.request = req->header.request;
     resp.body.u64 = 1ULL << VIRTIO_F_VERSION_1 |
+                    1ULL << VIRTIO_RING_F_INDIRECT_DESC |
                     1ULL << VHOST_USER_F_PROTOCOL_FEATURES |
-                    1ULL << VIRTIO_BLK_F_MQ;
+                    1ULL << VIRTIO_BLK_F_MQ |
+                    1ULL << VIRTIO_BLK_F_SIZE_MAX |
+                    1ULL << VIRTIO_BLK_F_SEG_MAX;
 
     if (vhost_user_write(dev, &resp) < 0) {
         return -1;
