@@ -23,6 +23,29 @@ int mock_io_queue_write(io_queue_t *self, void *buf, size_t count, off_t offset,
     return 0;
 }
 
+static size_t get_iov_len(struct iovec *iov, size_t iov_len) {
+    size_t res = 0;
+    for (size_t i = 0; i < iov_len; i++) {
+        res += iov[i].iov_len;
+    }
+
+    return res;
+}
+
+int mock_io_queue_readv(io_queue_t *self, struct iovec *iov, int iovcnt, off_t offset, bdev_callback_t cb, void *ctx) {
+    size_t count = get_iov_len(iov, iovcnt);
+    info("bdev_readv { count: 0x%zx, offset: 0x%lx }", count, offset);
+    cb(ctx, count);
+    return 0;
+}
+
+int mock_io_queue_writev(io_queue_t *self, struct iovec *iov, int iovcnt, off_t offset, bdev_callback_t cb, void *ctx) {
+    size_t count = get_iov_len(iov, iovcnt);
+    info("bdev_writev { count: 0x%zx, offset: 0x%lx }", count, offset);
+    cb(ctx, count);
+    return 0;
+}
+
 int mock_io_queue_flush(io_queue_t *self, bdev_callback_t cb, void *ctx) {
     info("bdev_flush {}");
     cb(ctx, 0);
@@ -32,6 +55,8 @@ int mock_io_queue_flush(io_queue_t *self, bdev_callback_t cb, void *ctx) {
 io_queue_vtable_t mock_io_queue_vtable = {
     .read = mock_io_queue_read,
     .write = mock_io_queue_write,
+    .readv = mock_io_queue_readv,
+    .writev = mock_io_queue_writev,
     .flush = mock_io_queue_flush,
 };
 

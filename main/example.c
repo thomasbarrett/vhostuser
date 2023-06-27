@@ -105,6 +105,7 @@ int virt_queue_poll(virt_queue_t *queue) {
         struct iovec iov[130];
 
         size_t len = 0;
+        size_t iov_len = 0;
         uint32_t i = id;        
         while (queue->vring.desc[i].flags & VRING_DESC_F_NEXT) {
             int res = virt_queue_read_desc(&guest_memory, &queue->vring.desc[i], iov, len, 130);
@@ -112,7 +113,8 @@ int virt_queue_poll(virt_queue_t *queue) {
                 error("failed to read desc");
                 return -1;
             }
-            len += res;
+            len += 1;
+            iov_len += res;
 
             i = queue->vring.desc[i].next;
             if (i >= queue->vring.num) {
@@ -125,7 +127,8 @@ int virt_queue_poll(virt_queue_t *queue) {
             error("failed to read desc");
             return -1;
         }
-        len += res;
+        len += 1;
+        iov_len += res;
 
         virtio_ctx_t *virtio_ctx = calloc(1, sizeof(virtio_ctx_t));
         virtio_ctx->vring = queue->vring;
@@ -134,7 +137,7 @@ int virt_queue_poll(virt_queue_t *queue) {
         virtio_ctx->eventfd = queue->call_eventfd;
 
         struct virtio_blk_outhdr* hdr = (struct virtio_blk_outhdr*) iov[0].iov_base;
-        virtio_blk_handle(queue->io_queue, hdr, iov, (uint8_t*) iov[len - 1].iov_base, virtio_ctx);
+        virtio_blk_handle(queue->io_queue, hdr, &iov[1], iov_len - 2, (uint8_t*) iov[iov_len - 1].iov_base, virtio_ctx);
     }
 
     return 0;
