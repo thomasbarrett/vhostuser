@@ -38,7 +38,7 @@ typedef struct virt_queue {
     volatile int done;
     pthread_t thread_id;
 
-    io_queue_t *io_queue;
+    bdev_queue_t *bdev_queue;
 
     int err_eventfd;
     int call_eventfd;
@@ -51,7 +51,7 @@ typedef struct virt_queue {
 } virt_queue_t;
 
 void vring_desc_debug(vring_desc_t *desc) {
-    printf("vring_desc_t { addr: %p, len: 0x%u, flags: %u, next: %d }\n", desc->addr, desc->len, desc->flags, desc->next);
+    printf("vring_desc_t { addr: %llu, len: 0x%u, flags: %u, next: %d }\n", desc->addr, desc->len, desc->flags, desc->next);
 }
 int virt_queue_read_desc_direct(guest_memory_t *mem, vring_desc_t *desc, struct iovec *iov, size_t i, size_t n) {
     if (i >= n) return -1;
@@ -141,7 +141,7 @@ int virt_queue_poll(virt_queue_t *queue) {
         virtio_ctx->eventfd = queue->call_eventfd;
 
         struct virtio_blk_outhdr* hdr = (struct virtio_blk_outhdr*) iov[0].iov_base;
-        virtio_blk_handle(queue->io_queue, hdr, &iov[1], len - 2, (uint8_t*) iov[len - 1].iov_base, virtio_ctx);
+        virtio_blk_handle(queue->bdev_queue, hdr, &iov[1], len - 2, (uint8_t*) iov[len - 1].iov_base, virtio_ctx);
     }
 
     return 0;
@@ -168,6 +168,14 @@ void* virt_queue_run(void *arg) {
         return (void*) (uintptr_t) -1ULL;
     }
 
+    int io_queue_fd = bdev_queue_eventfd(queue->bdev_queue);
+    event.events = EPOLLIN;
+    event.data.fd = io_queue_fd;
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, io_queue_fd, &event) == -1) {
+        perror("ERROR: failed to add fd to epoll context");
+        return (void*) (uintptr_t) -1ULL;
+    }
+
     while(!queue->done) {
         int n = epoll_wait(epollfd, events, MAX_EVENTS, 100);
         if (n == -1) {
@@ -185,8 +193,16 @@ void* virt_queue_run(void *arg) {
                     return (void*) (uintptr_t) -1ULL;
                 }   
             }
+            if (events[i].data.fd == io_queue_fd) {
+                if (bdev_queue_poll(queue->bdev_queue) < 0) {
+                    error("failed to poll io_queue");
+                    return (void*) (uintptr_t) -1ULL;
+                }
+            }
         }
     }
+
+    close(epollfd);
 
     printf("INFO: virt_queue exiting: index %d\n", queue->index);
     return NULL;
@@ -205,34 +221,36 @@ typedef struct vhost_user_device {
     int used_fd;
     struct virtio_blk_config config;
 
+    bdev_t *bdev;
     virt_queue_t queues[DEVICE_QUEUE_COUNT];
 } vhost_user_device_t;
 
 vhost_user_device_t vhost_user_device;
 
-void virt_queue_init(virt_queue_t *queue, int index) {
-    queue->index = index;
+void virt_queue_init(vhost_user_device_t *dev, virt_queue_t *queue, int i) {
+    queue->index = i;
     queue->state = QUEUE_STATE_DISABLED;
     queue->err_eventfd = -1;
     queue->call_eventfd = -1;
     queue->kick_eventfd = -1;
-    queue->io_queue = mock_io_queue_create();
+    queue->bdev_queue = bdev_get_queue(dev->bdev, i);
 }
 
 void vhost_user_device_init(vhost_user_device_t *dev) {
     memset(dev, 0, sizeof(vhost_user_device_t));
-    dev->config.capacity = 2097152;
+    dev->config.capacity = 1953525168;
     dev->config.num_queues = 4;
     dev->config.size_max = 16384;
     dev->config.seg_max = 32;
+    dev->bdev = aio_bdev_create("/dev/nvme0n1", 4, 128);
     for (size_t i = 0; i < DEVICE_QUEUE_COUNT; i++) {
-        virt_queue_init(&dev->queues[i], i);
+        virt_queue_init(dev, &dev->queues[i], i);
     }
 }
 
 int vhost_user_device_message(vhost_user_device_t *dev, vhost_user_message_t *msg, int *fd);
 
-int main() {
+int main(void) {
     int sockfd = socket(PF_UNIX, SOCK_STREAM, 0);
 	if (sockfd < 0) {
 		perror("failed to create socket");
@@ -552,12 +570,13 @@ int vhost_user_device_set_vring_enable(vhost_user_device_t *dev, vhost_user_mess
     size_t index = req->body.state.index;
     assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
     virt_queue_t *queue = &dev->queues[index];
+    unsigned int state = req->body.state.num;
     if (queue->state == QUEUE_STATE_STOPPED) {
-        printf("ERROR: attempt to (dis/en)nable stopped virt queue\n");
+        error("failed to %s virt-queue: stopped", state ? "enable": "disable");
         return -1;
     }
 
-    dev->queues[index].state = req->body.state.num;
+    dev->queues[index].state = state;
     
     return 0;
 }

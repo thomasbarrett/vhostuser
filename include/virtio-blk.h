@@ -9,6 +9,6 @@
 
 void virtio_blk_outhdr_debug(struct virtio_blk_outhdr *hdr) ;
 
-void virtio_blk_handle(io_queue_t *io_queue, struct virtio_blk_outhdr *hdr, struct iovec *iov, size_t iov_len, uint8_t *res, virtio_ctx_t *virtio_ctx);
+void virtio_blk_handle(bdev_queue_t *bdev_queue, struct virtio_blk_outhdr *hdr, struct iovec *iov, size_t iov_len, uint8_t *res, virtio_ctx_t *virtio_ctx);
 
 #endif

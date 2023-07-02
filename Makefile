@@ -27,7 +27,7 @@ bin/tests/%: tests/%.c $(OBJ_FILES)
 
 bin/example: main/example.c $(OBJ_FILES)
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS) $^ -o $@
+	@$(CC) $(CFLAGS) $^ -o $@ -laio
 
 # suppress error for missing test file
 bin/tests/%:
