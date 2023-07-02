@@ -47,13 +47,19 @@ typedef struct virt_queue {
 
     uint32_t flags;
     struct vring vring;
-    uint32_t last_avail_idx;
+    __virtio16 last_avail_idx;
 } virt_queue_t;
 
+void vring_desc_debug(vring_desc_t *desc) {
+    printf("vring_desc_t { addr: %p, len: 0x%u, flags: %u, next: %d }\n", desc->addr, desc->len, desc->flags, desc->next);
+}
 int virt_queue_read_desc_direct(guest_memory_t *mem, vring_desc_t *desc, struct iovec *iov, size_t i, size_t n) {
     if (i >= n) return -1;
     iov[i].iov_len = desc->len;
     if (guest_memory_guest_to_addr(mem, desc->addr, (void**) &iov[i].iov_base) < 0) {
+        info("virt_queue_read_desc_direct: i: %d, n: %d", i, n);
+        vring_desc_debug(desc);
+        error("failed to translate address: %p", desc->addr);
         return -1;
     }
 
@@ -65,6 +71,7 @@ int virt_queue_read_desc_indirect(guest_memory_t *mem, vring_desc_t *desc, struc
 
     vring_desc_t *indirect_desc_table;
     if (guest_memory_guest_to_addr(mem, desc->addr, (void **) &indirect_desc_table) < 0) {
+        error("failed to translate address: %p", desc->addr);
         return -1;
     }
 
@@ -105,7 +112,6 @@ int virt_queue_poll(virt_queue_t *queue) {
         struct iovec iov[130];
 
         size_t len = 0;
-        size_t iov_len = 0;
         uint32_t i = id;        
         while (queue->vring.desc[i].flags & VRING_DESC_F_NEXT) {
             int res = virt_queue_read_desc(&guest_memory, &queue->vring.desc[i], iov, len, 130);
@@ -114,7 +120,6 @@ int virt_queue_poll(virt_queue_t *queue) {
                 return -1;
             }
             len += 1;
-            iov_len += res;
 
             i = queue->vring.desc[i].next;
             if (i >= queue->vring.num) {
@@ -128,16 +133,15 @@ int virt_queue_poll(virt_queue_t *queue) {
             return -1;
         }
         len += 1;
-        iov_len += res;
 
         virtio_ctx_t *virtio_ctx = calloc(1, sizeof(virtio_ctx_t));
         virtio_ctx->vring = queue->vring;
         virtio_ctx->id = id;
-        virtio_ctx->len = len;
+        virtio_ctx->len = 0;
         virtio_ctx->eventfd = queue->call_eventfd;
 
         struct virtio_blk_outhdr* hdr = (struct virtio_blk_outhdr*) iov[0].iov_base;
-        virtio_blk_handle(queue->io_queue, hdr, &iov[1], iov_len - 2, (uint8_t*) iov[iov_len - 1].iov_base, virtio_ctx);
+        virtio_blk_handle(queue->io_queue, hdr, &iov[1], len - 2, (uint8_t*) iov[len - 1].iov_base, virtio_ctx);
     }
 
     return 0;
@@ -220,7 +224,7 @@ void vhost_user_device_init(vhost_user_device_t *dev) {
     dev->config.capacity = 2097152;
     dev->config.num_queues = 4;
     dev->config.size_max = 16384;
-    dev->config.seg_max = 128;
+    dev->config.seg_max = 32;
     for (size_t i = 0; i < DEVICE_QUEUE_COUNT; i++) {
         virt_queue_init(&dev->queues[i], i);
     }
@@ -336,7 +340,7 @@ int vhost_user_device_get_features(vhost_user_device_t *dev, vhost_user_message_
     resp.header.size = sizeof(uint64_t);
     resp.header.request = req->header.request;
     resp.body.u64 = 1ULL << VIRTIO_F_VERSION_1 |
-                    1ULL << VIRTIO_RING_F_INDIRECT_DESC |
+                    // 1ULL << VIRTIO_RING_F_INDIRECT_DESC |
                     1ULL << VHOST_USER_F_PROTOCOL_FEATURES |
                     1ULL << VIRTIO_BLK_F_MQ |
                     1ULL << VIRTIO_BLK_F_SIZE_MAX |
