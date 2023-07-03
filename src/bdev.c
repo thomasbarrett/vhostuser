@@ -2,6 +2,7 @@
 
 #include <bdev.h>
 #include <log.h>
+#include <queue.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -25,12 +26,19 @@ typedef struct aio_bdev {
     size_t queue_depth;
 } aio_bdev_t;
 
+typedef struct aio_bdev_io {
+    bdev_callback_t cb;
+    void *ctx;
+    struct iocb iocb;
+} aio_bdev_io_t;
+
 typedef struct aio_bdev_queue {
     bdev_queue_vtable_t vtable;
     aio_bdev_t *bdev;
     int eventfd;
     io_context_t ctx;
-    size_t inflight;
+    aio_bdev_io_t *ios;
+    queue_t tags; 
 } aio_bdev_queue_t;
 
 typedef struct aio_bdev_queue_callback {
@@ -38,110 +46,133 @@ typedef struct aio_bdev_queue_callback {
     void *ctx;
 } aio_bdev_queue_callback_t;
 
-int aio_bdev_queue_callback_init(struct iocb *io, bdev_callback_t cb, void *ctx) {
-    aio_bdev_queue_callback_t *cb2 = malloc(sizeof(aio_bdev_queue_callback_t));
-    if (cb2 == NULL) return -1;
-
-    cb2->cb = cb;
-    cb2->ctx = ctx;
-    io->data = cb2;
-    return 0;
-}
-
-void aio_bdev_queue_callback_deinit(aio_bdev_queue_t *queue, struct io_event *event) {
-    aio_bdev_queue_callback_t *cb2 = event->data;
-    cb2->cb(cb2->ctx, event->res);
-
-    free(cb2);
-}
-
 void aio_bdev_queue_read(bdev_queue_t *q, void *buf, size_t count, off_t offset, bdev_callback_t cb, void *ctx) {
     aio_bdev_queue_t *queue = (aio_bdev_queue_t*) q;
 
-    struct iocb io = {0};
-    io_prep_pread(&io, queue->bdev->fd, buf, count, offset);
-    io_set_eventfd(&io, queue->eventfd);
-    int res = aio_bdev_queue_callback_init(&io, cb, ctx);
-    if (res < 0) goto error;
+    uint32_t tag;
+    int res = queue_pop(&queue->tags, &tag);
+    if (res < 0) goto error0;
+    queue->ios[tag].cb = cb;
+    queue->ios[tag].ctx = ctx;
+    queue->ios[tag].iocb = (struct iocb){0};
 
-    struct iocb *ios[1] = {&io};
+    struct iocb *iocb = &queue->ios[tag].iocb;
+    io_prep_pread(iocb, queue->bdev->fd, buf, count, offset);
+    io_set_eventfd(iocb, queue->eventfd);
+    iocb->data = (void *) (uintptr_t) tag;
+
+    struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error;
+    if (res < 0) goto error1;
 
     return;
-error:
+error1:
+    queue_push(&queue->tags, tag);
+error0:
     cb(ctx, -1);
 }
 
 void aio_bdev_queue_write(bdev_queue_t *q, void *buf, size_t count, off_t offset, bdev_callback_t cb, void *ctx) {
     aio_bdev_queue_t *queue = (aio_bdev_queue_t*) q;
 
-    struct iocb io = {0};
-    io_prep_pwrite(&io, queue->bdev->fd, buf, count, offset);
-    io_set_eventfd(&io, queue->eventfd);
-    int res = aio_bdev_queue_callback_init(&io, cb, ctx);
-    if (res < 0) goto error;
+    uint32_t tag;
+    int res = queue_pop(&queue->tags, &tag);
+    if (res < 0) goto error0;
+    queue->ios[tag].cb = cb;
+    queue->ios[tag].ctx = ctx;
+    queue->ios[tag].iocb = (struct iocb){0};
 
-    struct iocb *ios[1] = {&io};
+    struct iocb *iocb = &queue->ios[tag].iocb;
+    io_prep_pwrite(iocb, queue->bdev->fd, buf, count, offset);
+    io_set_eventfd(iocb, queue->eventfd);
+    iocb->data = (void *) (uintptr_t) tag;
+
+    struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error;
+    if (res < 0) goto error1;
 
     return;
-error:
+error1:
+    queue_push(&queue->tags, tag);
+error0:
     cb(ctx, -1);
 }
 
 void aio_bdev_queue_readv(bdev_queue_t *q, struct iovec *iov, int iovcnt, off_t offset, bdev_callback_t cb, void *ctx) {
     aio_bdev_queue_t *queue = (aio_bdev_queue_t*) q;
-    struct iocb io = {0};
 
-    io_prep_preadv(&io, queue->bdev->fd, iov, iovcnt, offset);
-    io_set_eventfd(&io, queue->eventfd);
-    int res = aio_bdev_queue_callback_init(&io, cb, ctx);
-    if (res < 0) goto error;
+    uint32_t tag;
+    int res = queue_pop(&queue->tags, &tag);
+    if (res < 0) goto error0;
+    queue->ios[tag].cb = cb;
+    queue->ios[tag].ctx = ctx;
+    queue->ios[tag].iocb = (struct iocb){0};
 
-    struct iocb *ios[1] = {&io};
+    struct iocb *iocb = &queue->ios[tag].iocb;
+    io_prep_preadv(iocb, queue->bdev->fd, iov, iovcnt, offset);
+    io_set_eventfd(iocb, queue->eventfd);
+    iocb->data = (void *) (uintptr_t) tag;
+
+    struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error;
+    if (res < 0) goto error1;
 
     return;
-error:
+error1:
+    queue_push(&queue->tags, tag);
+error0:
     cb(ctx, -1);
 }
 
 void aio_bdev_queue_writev(bdev_queue_t *q, struct iovec *iov, int iovcnt, off_t offset, bdev_callback_t cb, void *ctx) {
     aio_bdev_queue_t *queue = (aio_bdev_queue_t*) q;
 
-    struct iocb io = {0};
-    io_prep_pwritev(&io, queue->bdev->fd, iov, iovcnt, offset);
-    io_set_eventfd(&io, queue->eventfd);
-    int res = aio_bdev_queue_callback_init(&io, cb, ctx);
-    if (res < 0) goto error;
+    uint32_t tag;
+    int res = queue_pop(&queue->tags, &tag);
+    if (res < 0) goto error0;
+    queue->ios[tag].cb = cb;
+    queue->ios[tag].ctx = ctx;
+    queue->ios[tag].iocb = (struct iocb){0};
 
-    struct iocb *ios[1] = {&io};
+    struct iocb *iocb = &queue->ios[tag].iocb;
+    io_prep_pwritev(iocb, queue->bdev->fd, iov, iovcnt, offset);
+    io_set_eventfd(iocb, queue->eventfd);
+    iocb->data = (void *) (uintptr_t) tag;
+
+    struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error;
+    if (res < 0) goto error1;
 
     return;
-error:
+error1:
+    queue_push(&queue->tags, tag);
+error0:
     cb(ctx, -1);
 }
 
 void aio_bdev_queue_flush(bdev_queue_t *q, bdev_callback_t cb, void *ctx) {
     aio_bdev_queue_t *queue = (aio_bdev_queue_t*) q;
 
-    struct iocb io = {0};
-    io_prep_fsync(&io, queue->bdev->fd);
-    io_set_eventfd(&io, queue->eventfd);
-    int res = aio_bdev_queue_callback_init(&io, cb, ctx);
-    if (res < 0) goto error;
+    uint32_t tag;
+    int res = queue_pop(&queue->tags, &tag);
+    if (res < 0) goto error0;
+    queue->ios[tag].cb = cb;
+    queue->ios[tag].ctx = ctx;
+    queue->ios[tag].iocb = (struct iocb){0};
 
-    struct iocb *ios[1] = {&io};
+    struct iocb *iocb = &queue->ios[tag].iocb;
+    io_prep_fsync(iocb, queue->bdev->fd);
+    io_set_eventfd(iocb, queue->eventfd);
+    iocb->data = (void *) (uintptr_t) tag;
+
+    struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error;
+    if (res < 0) goto error1;
 
     return;
-error:
+error1:
+    queue_push(&queue->tags, tag);
+error0:
     cb(ctx, -1);
 }
 
@@ -160,8 +191,10 @@ int aio_bdev_queue_poll(bdev_queue_t *q) {
         return -1;
     }
     for (int j = 0; j < res; j++) {
-        queue->inflight--;
-        aio_bdev_queue_callback_deinit(queue, &cqe[j]);
+        uint32_t tag = (uint32_t) (uintptr_t) cqe[j].data;
+        aio_bdev_io_t *io = &queue->ios[tag];
+        io->cb(io->ctx, cqe[j].res);
+        queue_push(&queue->tags, tag);
     }
 
     return 0;
@@ -186,31 +219,39 @@ bdev_queue_vtable_t aio_bdev_queue_vtable = {
 aio_bdev_queue_t* aio_bdev_queue_create(aio_bdev_t *bdev) {
     aio_bdev_queue_t *queue = calloc(1, sizeof(aio_bdev_queue_t));
     if (queue == NULL) return NULL;
+    queue->ios = calloc(bdev->queue_depth, sizeof(aio_bdev_io_t));
+    if (queue->ios == NULL) goto error0;
     queue->vtable = aio_bdev_queue_vtable;
     queue->bdev = bdev;
-
-    int res = io_setup(bdev->queue_depth, &queue->ctx);
-    if (res < 0) {
-        errno = -res;
-        goto error0;
+    
+    int res = queue_init(&queue->tags, bdev->queue_depth);
+    if (res < 0) goto error1;
+    for (size_t i = 0; i < bdev->queue_depth; i++) {
+        queue_push(&queue->tags, i);
     }
 
-    queue->eventfd = eventfd(0, EFD_NONBLOCK);
-    if (queue->eventfd < 0) {
-        goto error1;
-    }
+    res = io_setup(bdev->queue_depth, &queue->ctx);
+    if (res < 0) goto error2;
+
+    res = eventfd(0, EFD_NONBLOCK);
+    if (res < 0) goto error3;
+    queue->eventfd = res;
 
     return queue;
 
-error1:
+error3:
     io_destroy(queue->ctx);
-
+error2:
+    queue_deinit(&queue->tags);
+error1:
+    free(queue->ios);
 error0:
     free(queue);
     return NULL;
 }
 
 void aio_bdev_queue_destroy(aio_bdev_queue_t *queue) {
+    free(queue->ios);
     free(queue);
 }
 
@@ -258,13 +299,12 @@ error0:
     return NULL;
 }
 
-void aio_bdev_destroy(bdev_t *bdev) {
-    aio_bdev_t *aio_bdev = (aio_bdev_t*) bdev;
-    for (size_t i = 0; i < aio_bdev->queue_count; i++) {
-        aio_bdev_queue_destroy(aio_bdev->queues[i]);
+void aio_bdev_destroy(bdev_t *b) {
+    aio_bdev_t *bdev = (aio_bdev_t*) bdev;
+    for (size_t i = 0; i < bdev->queue_count; i++) {
+        aio_bdev_queue_destroy(bdev->queues[i]);
     }
-    free(aio_bdev->queues);
-    close(aio_bdev->fd);
-    free(aio_bdev);
+    free(bdev->queues);
+    close(bdev->fd);
+    free(bdev);
 }
-
