@@ -48,7 +48,6 @@ const char* vhost_user_message_type_str(vhost_user_message_type_t t) {
     }
 }
 
-
 void vhost_vring_addr_debug(struct vhost_vring_addr *vra) {
     printf("struct vhost_vring_addr { " 
         "index: %u, "

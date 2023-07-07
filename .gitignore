@@ -2,3 +2,5 @@
 .vscode/
 obj/
 bin/
+profraw/
+default.profdata

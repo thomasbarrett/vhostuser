@@ -4,17 +4,12 @@
 #include <log.h>
 #include <queue.h>
 
-#include <string.h>
 #include <stdlib.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <assert.h>
-#include <stdlib.h>
-#include <errno.h>
-
 #include <sys/eventfd.h>
 
 #include <libaio.h>
+
 
 struct aio_bdev_queue;
 
@@ -39,6 +34,7 @@ typedef struct aio_bdev_queue {
     io_context_t ctx;
     aio_bdev_io_t *ios;
     queue_t tags; 
+    struct io_event *events;
 } aio_bdev_queue_t;
 
 typedef struct aio_bdev_queue_callback {
@@ -180,20 +176,18 @@ int aio_bdev_queue_poll(bdev_queue_t *q) {
     aio_bdev_queue_t *queue = (aio_bdev_queue_t*) q;
     uint64_t nevents;
     read(queue->eventfd, &nevents, sizeof(nevents));
-    struct io_event cqe[128];
     struct timespec timeout = (struct timespec) {
         .tv_sec = 0,
         .tv_nsec = 100000000
     };
-    int res = io_getevents(queue->ctx, 1, 128, cqe, &timeout);
+    int res = io_getevents(queue->ctx, 1, queue->bdev->queue_depth, queue->events, &timeout);
     if (res < 0) {
-        errno = -res;
         return -1;
     }
     for (int j = 0; j < res; j++) {
-        uint32_t tag = (uint32_t) (uintptr_t) cqe[j].data;
+        uint32_t tag = (uint32_t) (uintptr_t) queue->events[j].data;
         aio_bdev_io_t *io = &queue->ios[tag];
-        io->cb(io->ctx, cqe[j].res);
+        io->cb(io->ctx, queue->events[j].res);
         queue_push(&queue->tags, tag);
     }
 
@@ -221,28 +215,34 @@ aio_bdev_queue_t* aio_bdev_queue_create(aio_bdev_t *bdev) {
     if (queue == NULL) return NULL;
     queue->ios = calloc(bdev->queue_depth, sizeof(aio_bdev_io_t));
     if (queue->ios == NULL) goto error0;
+
+    queue->events = calloc(bdev->queue_depth, sizeof(struct io_event));
+    if (queue->events == NULL) goto error1;
+
     queue->vtable = aio_bdev_queue_vtable;
     queue->bdev = bdev;
     
     int res = queue_init(&queue->tags, bdev->queue_depth);
-    if (res < 0) goto error1;
+    if (res < 0) goto error2;
     for (size_t i = 0; i < bdev->queue_depth; i++) {
         queue_push(&queue->tags, i);
     }
 
     res = io_setup(bdev->queue_depth, &queue->ctx);
-    if (res < 0) goto error2;
+    if (res < 0) goto error3;
 
     res = eventfd(0, EFD_NONBLOCK);
-    if (res < 0) goto error3;
+    if (res < 0) goto error4;
     queue->eventfd = res;
 
     return queue;
 
-error3:
+error4:
     io_destroy(queue->ctx);
-error2:
+error3:
     queue_deinit(&queue->tags);
+error2:
+    free(queue->events);
 error1:
     free(queue->ios);
 error0:
@@ -251,6 +251,10 @@ error0:
 }
 
 void aio_bdev_queue_destroy(aio_bdev_queue_t *queue) {
+    close(queue->eventfd);
+    io_destroy(queue->ctx);
+    queue_deinit(&queue->tags);
+    free(queue->events);
     free(queue->ios);
     free(queue);
 }
@@ -300,7 +304,7 @@ error0:
 }
 
 void aio_bdev_destroy(bdev_t *b) {
-    aio_bdev_t *bdev = (aio_bdev_t*) bdev;
+    aio_bdev_t *bdev = (aio_bdev_t*) b;
     for (size_t i = 0; i < bdev->queue_count; i++) {
         aio_bdev_queue_destroy(bdev->queues[i]);
     }

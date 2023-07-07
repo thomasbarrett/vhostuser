@@ -1,6 +1,7 @@
 #include <guest_memory.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <assert.h>
 
 void guest_memory_init(guest_memory_t *mem) {
     mem->regions_len = 0;
