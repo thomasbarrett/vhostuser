@@ -1,5 +1,5 @@
 CC=clang
-CFLAGS = -std=c11 -Wall -pedantic -Iinclude -Wall -O3 -g -Wno-address-of-packed-member
+CFLAGS = -std=c11 -Wall -pedantic -Iinclude -Wall -O3 -Wno-address-of-packed-member
 SRC_FILES = $(wildcard src/*.c)  $(wildcard src/*/*.c)
 FILES = $(basename $(SRC_FILES:src/%=%))
 OBJ_FILES = $(addprefix obj/,$(FILES:=.o))

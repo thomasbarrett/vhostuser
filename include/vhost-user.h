@@ -114,6 +114,13 @@ typedef struct single_memory_region_desc {
     memory_region_desc_t desc;
 } single_single_memory_region_desc_t;
 
+typedef struct inflight_desc {
+    uint64_t mmap_size;
+    uint64_t mmap_offset;
+    uint16_t num_queues;
+    uint16_t queue_size;
+} inflight_desc_t;
+
 typedef struct vhost_user_message {
     struct {
         uint32_t request;
@@ -126,6 +133,7 @@ typedef struct vhost_user_message {
         struct vhost_vring_addr addr;
         virtio_device_config_t config;
         single_single_memory_region_desc_t single_region_desc;
+        inflight_desc_t inflight_desc;
     } body;
 } __attribute__((__packed__)) vhost_user_message_t;
 

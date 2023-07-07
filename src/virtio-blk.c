@@ -5,11 +5,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <log.h>
 
 typedef struct virtio_blk_io_ctx {
     uint8_t *res;
     virtio_ctx_t *virtio_ctx;
     size_t size;
+    size_t sector;
 } virtio_blk_io_ctx_t;
 
 void virtio_blk_io_cb(void *ctx, ssize_t res) {
@@ -42,6 +44,7 @@ void virtio_blk_handle(bdev_queue_t *bdev_queue, struct virtio_blk_outhdr *hdr, 
             io_ctx->res = res;
             io_ctx->virtio_ctx = virtio_ctx;
             io_ctx->size = get_iov_len(iov, iovcnt);
+            io_ctx->sector = hdr->sector;
             if (iovcnt == 1) {
                 bdev_queue_read(bdev_queue, iov[0].iov_base, iov[0].iov_len, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
             } else {
@@ -57,6 +60,7 @@ void virtio_blk_handle(bdev_queue_t *bdev_queue, struct virtio_blk_outhdr *hdr, 
             io_ctx->res = res;
             io_ctx->virtio_ctx = virtio_ctx;
             io_ctx->size = get_iov_len(iov, iovcnt);
+            io_ctx->sector = hdr->sector;
             if (iovcnt == 1) {
                 bdev_queue_write(bdev_queue, iov[0].iov_base, iov[0].iov_len, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
             } else {
@@ -71,6 +75,7 @@ void virtio_blk_handle(bdev_queue_t *bdev_queue, struct virtio_blk_outhdr *hdr, 
             io_ctx->res = res;
             io_ctx->virtio_ctx = virtio_ctx;
             io_ctx->size = 0;
+            io_ctx->sector = hdr->sector;
             bdev_queue_flush(bdev_queue, virtio_blk_io_cb, io_ctx);
             return;
         }
