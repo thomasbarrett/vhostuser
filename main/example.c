@@ -43,7 +43,6 @@ typedef struct virt_queue {
     int err_eventfd;
     int call_eventfd;
     int kick_eventfd;
-    uint32_t base_offset;
 
     uint32_t flags;
     struct vring vring;
@@ -490,7 +489,7 @@ int vhost_user_device_set_vring_num(vhost_user_device_t *dev, vhost_user_message
 int vhost_user_device_set_vring_base(vhost_user_device_t *dev, vhost_user_message_t *req) {
     size_t index = req->body.state.index;
     assert(index >= 0 && index < DEVICE_QUEUE_COUNT);
-    dev->queues[index].base_offset = req->body.state.num;
+    dev->queues[index].last_avail_idx = req->body.state.num;
     return 0;
 }
 
@@ -553,12 +552,22 @@ int vhost_user_device_get_vring_base(vhost_user_device_t *dev, vhost_user_messag
     resp.header.size = sizeof(struct vhost_vring_state);
     resp.header.request = req->header.request;
     resp.body.state.index = index;
-    resp.body.state.num = dev->queues[index].base_offset;
+    resp.body.state.num = dev->queues[index].last_avail_idx;
 
     dev->queues[index].done = 1;
     pthread_join(dev->queues[index].thread_id, NULL);
     dev->queues[index].state = QUEUE_STATE_STOPPED;
     
+    if (dev->queues[index].call_eventfd != -1) {
+        close(dev->queues[index].call_eventfd);
+        dev->queues[index].call_eventfd = -1;
+    }
+
+    if (dev->queues[index].kick_eventfd != -1) {
+        close(dev->queues[index].kick_eventfd);
+        dev->queues[index].kick_eventfd = -1;
+    }
+
     if (vhost_user_write(dev, &resp) < 0) {
         return -1;
     }
@@ -589,6 +598,7 @@ int vhost_user_device_add_memory_region(vhost_user_device_t *dev, vhost_user_mes
 }
 
 int vhost_user_device_message(vhost_user_device_t *dev, vhost_user_message_t *msg, int *fd) {
+    info("recv: %s", vhost_user_message_type_str(msg->header.request));
     switch (msg->header.request) {
     case VHOST_USER_SET_OWNER:
         return vhost_user_device_set_owner(dev, msg);
