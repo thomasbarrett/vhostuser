@@ -1,6 +1,10 @@
 #ifndef VHOSTUSER_H
 #define VHOSTUSER_H
 
+#include <guest_memory.h>
+#include <virtio-core.h>
+#include <linux/virtio_blk.h>
+
 #include <stdint.h>
 #include <linux/vhost_types.h>
 
@@ -138,5 +142,56 @@ typedef struct vhost_user_message {
 } __attribute__((__packed__)) vhost_user_message_t;
 
 void vhost_vring_addr_debug(struct vhost_vring_addr *vra);
+
+#define DEVICE_QUEUE_COUNT_MAX 16
+#define DEVICE_QUEUE_DEPTH_MAX 1024
+
+#define BUFFER_SIZE 4096
+
+typedef struct vhost_user_device {
+    int owned;
+
+    int sock_fd;
+    int client_fd;
+    uint32_t protocol_features;
+
+    int features_acked;
+    uint32_t acked_features;
+    uint32_t acked_protocol_features;
+
+    int used_fd;
+    struct virtio_blk_config config;
+
+    bdev_t *bdev;
+
+    size_t queue_count;
+    size_t queue_depth;
+    virt_queue_t queues[DEVICE_QUEUE_COUNT_MAX];
+    
+    task_queue_t **task_queues;
+    size_t task_queue_count;
+
+    guest_memory_t guest_memory;
+
+    task_t accept_task;
+    task_t read_task;
+
+    uint64_t status;
+
+    /* unix socket read buffer */
+    struct {
+        int fd;
+        uint8_t buf[BUFFER_SIZE];
+        size_t buf_len;
+    } read_state;
+} vhost_user_device_t;
+
+int vhost_user_device_init(vhost_user_device_t *dev, metric_client_t *metric_client, const char *sock_path, size_t queue_count, size_t queue_depth, task_queue_t **task_queues, size_t task_queue_count);
+void vhost_user_device_deinit(vhost_user_device_t *dev);
+int vhost_user_device_handle(vhost_user_device_t *dev, vhost_user_message_t *msg, int *fd);
+int vhost_user_device_poll(vhost_user_device_t *dev, int _);
+int vhost_user_device_epoll_register(vhost_user_device_t *dev, int epollfd);
+int vhost_user_device_epoll_deregister(vhost_user_device_t *dev, int epollfd);
+int vhost_user_accept(vhost_user_device_t *dev, int epollfd);
 
 #endif

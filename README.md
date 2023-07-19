@@ -21,7 +21,7 @@ The following command can be used to start a qemu virtual machine with a vhostus
 -drive file=jammy-server-cloudimg-amd64.img,format=qcow2 \
 -netdev user,id=user.0,hostfwd=tcp::8022-:22 \
 -device virtio-net,netdev=user.0 \
--chardev socket,id=char1,path=/tmp/vhost-blk.sock,reconnect=1 \
--device vhost-user-blk-pci,chardev=char1 \
+-chardev socket,id=char0,path=/tmp/vhost-blk.sock,reconnect=1 \
+-device vhost-user-blk-pci,chardev=char0,num-queues=4,queue-size=128 \
 -monitor none
 ```

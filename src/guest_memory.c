@@ -3,8 +3,10 @@
 #include <sys/mman.h>
 #include <assert.h>
 
-void guest_memory_init(guest_memory_t *mem) {
+int guest_memory_init(guest_memory_t *mem) {
     mem->regions_len = 0;
+
+    return 0;
 }
 
 void guest_memory_deinit(guest_memory_t *mem) {

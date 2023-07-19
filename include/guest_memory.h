@@ -19,7 +19,7 @@ typedef struct guest_memory {
     size_t regions_len;
 } guest_memory_t;
 
-void guest_memory_init(guest_memory_t *mem);
+int guest_memory_init(guest_memory_t *mem);
 void guest_memory_deinit(guest_memory_t *mem);
 int guest_memory_add_region(guest_memory_t *mem, int fd, uint64_t size, uint64_t mmap_offset, uint64_t guest_addr, uint64_t user_addr);
 int guest_memory_user_to_guest(guest_memory_t *mem, uint64_t user_addr, uint64_t *guest_addr);
