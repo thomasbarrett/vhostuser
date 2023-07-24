@@ -183,7 +183,7 @@ int virt_queue_poll(virt_queue_t *queue, int _) {
         return -1;
     }
 
-    metric_counter_inc(&queue->kick_count);
+    metric_counter_inc(&queue->kick_count, 1);
 
     // The back-end must start ring upon receiving a kick.
     if (queue->state == QUEUE_STATE_STOPPED) {
@@ -227,6 +227,6 @@ void virt_queue_init(virt_queue_t *queue, metric_client_t *metric_client, guest_
 }
 
 void virt_queue_deinit(virt_queue_t *queue) {
-    metric_client_unregister(queue->metric_client, &queue->kick_count.metric);
+    metric_client_deregister(queue->metric_client, &queue->kick_count.metric);
     metric_counter_deinit(&queue->kick_count);
 }

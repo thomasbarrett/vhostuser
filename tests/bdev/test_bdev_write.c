@@ -1,6 +1,7 @@
 // CFLAGS: -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=eventfd -Wl,--wrap=read
 #include <src/bdev.c>
 #include <src/queue.c>
+#include <src/log.c>
 
 #include <assert.h>
 

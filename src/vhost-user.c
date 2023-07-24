@@ -100,7 +100,7 @@ int vhost_user_device_init(vhost_user_device_t *dev, metric_client_t *metric_cli
     }
     dev->queue_depth = queue_depth;
     for (size_t i = 0; i < queue_count; i++) {
-        virtio_blk_queue_t *queue = virtio_blk_queue_create(bdev_get_queue(dev->bdev, i));
+        virtio_blk_queue_t *queue = virtio_blk_queue_create(bdev_get_queue(dev->bdev, i), i, metric_client);
         if (queue == NULL) goto error2;
         virt_queue_init(&dev->queues[i], metric_client, &dev->guest_memory, (device_queue_t*) queue, i);
         dev->queue_count++;

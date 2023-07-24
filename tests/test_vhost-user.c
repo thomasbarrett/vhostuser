@@ -5,6 +5,7 @@
 #include <src/task_queue.c>
 #include <src/virtio-blk.c>
 #include <src/metrics.c>
+#include <src/http.c>
 
 bdev_t* aio_bdev_create(char *path, size_t queue_count, size_t queue_depth) {
     return NULL;

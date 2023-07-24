@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
+#include <http.h>
 
 #define METRICS_MAX_LABEL_COUNT 16
 #define METRICS_MAX_LABEL_KEY_SIZE 64
@@ -48,37 +49,76 @@ typedef struct metric {
     int (*points)(struct metric*, metric_point_t *points, size_t count);
 } metric_t;
 
+struct metric_gauge;
+
+typedef int (*gauge_value_func_t)(struct metric_gauge *gauge, double *res);
+
 typedef struct metric_gauge {
     metric_t metric;
-    int (*value)(struct metric_gauge *gauge, double *res);
+    gauge_value_func_t value;
 } metric_gauge_t;
 
-int metric_gauge_init(metric_gauge_t *gauge, const char *name, metric_label_t *labels, size_t label_count);
-void metric_gauge_deinit(metric_gauge_t *counter);
+/**
+ * Initialize the metric_gauge_t with the given name, labels, and value function.
+ * 
+ * \param gauge: the gauge.
+ * \param name: the metric name.
+ * \param labels: the metric labels.
+ * \param label_count: the number of metric labels.
+ * \param value: the gauge value function.
+ * \return 0 on success and -1 on error.
+ */
+int metric_gauge_init(metric_gauge_t *gauge, const char *name, metric_label_t *labels, size_t label_count, gauge_value_func_t value);
+
+/**
+ * Deinitialize the metric_gauge_t.
+ * 
+ * \param gauge: the gauge.
+ */
+void metric_gauge_deinit(metric_gauge_t *gauge);
 
 typedef struct metric_counter {
     metric_t metric;
     atomic_ullong count;
 } metric_counter_t;
 
+/**
+ * Initialize the metric_counter_t with the given name, labels, and value function.
+ * 
+ * \param counter: the counter.
+ * \param name: the metric name.
+ * \param labels: the metric labels.
+ * \param label_count: the number of metric labels.
+ * \return 0 on success and -1 on error.
+ */
 int metric_counter_init(metric_counter_t *counter, const char *name, metric_label_t *labels, size_t label_count);
+
+/**
+ * Deinitialize the metric_counter_t.
+ * 
+ * \param counter: the counter.
+ */
 void metric_counter_deinit(metric_counter_t *counter);
-void metric_counter_inc(metric_counter_t *counter);
+
+/**
+ * Increment the metric_count_t by count. This function is safe to call from any thread.
+ * 
+ * \param counter: the counter.
+ * \param count: the amount to increment the counter by. 
+ */
+void metric_counter_inc(metric_counter_t *counter, uint64_t count);
 
 #define METRIC_CLIENT_METRIC_COUNT_MAX 1024
-#define METRIC_CLIENT_REQUEST_MAX 16384
 typedef struct metric_client {
-    int fd;
+    http_server_t http_server;
     metric_t *metrics[METRIC_CLIENT_METRIC_COUNT_MAX];
-    uint8_t *buf;
-    size_t buf_capacity;
-    size_t buf_len;
 } metric_client_t;
 
-int metric_client_init(metric_client_t *client);
-int metric_client_deinit(metric_client_t *client);
+int metric_client_init(metric_client_t *client, uint16_t port);
+void metric_client_deinit(metric_client_t *client);
+int metric_client_epoll_register(metric_client_t *self, int epollfd);
+int metric_client_epoll_deregister(metric_client_t *self, int epollfd);
 int metric_client_register(metric_client_t *client, metric_t *metric);
-int metric_client_unregister(metric_client_t *client, metric_t *metric);
-int metric_client_print(metric_client_t *client);
+int metric_client_deregister(metric_client_t *client, metric_t *metric);
 
 #endif

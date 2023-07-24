@@ -5,6 +5,7 @@
 #include <bdev.h>
 
 #include <sys/uio.h>
+#include <stdatomic.h>
 
 /**
  * A virtio-blk device queue.
@@ -13,6 +14,12 @@ typedef struct virtio_blk_queue {
     device_queue_vtable_t vtable;
     bdev_queue_t *bdev_queue;
     task_t poll;
+
+    metric_client_t *metrics_client;
+    metric_counter_t read_bytes_count;
+    metric_counter_t reads_completed_count;
+    metric_counter_t written_bytes_count;
+    metric_counter_t writes_completed_count;
 } virtio_blk_queue_t;
 
 /**
@@ -22,7 +29,7 @@ typedef struct virtio_blk_queue {
  * 
  * \param bdev_queue: the bdev_t queue.
  */
-virtio_blk_queue_t* virtio_blk_queue_create(bdev_queue_t *bdev_queue);
+virtio_blk_queue_t* virtio_blk_queue_create(bdev_queue_t *bdev_queue, int i, metric_client_t *metric_client);
 
 /**
  * Destroy the virtio_blk_queue_t and free all resources

@@ -4,6 +4,7 @@
 #include <log.h>
 #include <queue.h>
 
+#include <errno.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <sys/eventfd.h>
@@ -85,7 +86,10 @@ void aio_bdev_queue_write(bdev_queue_t *q, void *buf, size_t count, off_t offset
 
     struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error1;
+    if (res < 0) {
+        error("Failed to submit io: %s", strerror(errno));
+        goto error1;
+    }
 
     return;
 error1:
@@ -111,7 +115,10 @@ void aio_bdev_queue_readv(bdev_queue_t *q, struct iovec *iov, int iovcnt, off_t 
 
     struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error1;
+    if (res < 0) {
+        error("Failed to submit io: %s", strerror(errno));
+        goto error1;
+    }
 
     return;
 error1:
@@ -137,7 +144,10 @@ void aio_bdev_queue_writev(bdev_queue_t *q, struct iovec *iov, int iovcnt, off_t
 
     struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error1;
+    if (res < 0) {
+        error("Failed to submit io: %s", strerror(errno));
+        goto error1;
+    }
 
     return;
 error1:
@@ -163,7 +173,10 @@ void aio_bdev_queue_flush(bdev_queue_t *q, bdev_callback_t cb, void *ctx) {
 
     struct iocb *ios[1] = {iocb};
     res = io_submit(queue->ctx, 1, ios);
-    if (res < 0) goto error1;
+    if (res < 0) {
+        error("Failed to submit io: %s", strerror(errno));
+        goto error1;
+    }
 
     return;
 error1:
@@ -174,16 +187,23 @@ error0:
 
 int aio_bdev_queue_poll(bdev_queue_t *q) {
     aio_bdev_queue_t *queue = (aio_bdev_queue_t*) q;
-    uint64_t nevents;
-    read(queue->eventfd, &nevents, sizeof(nevents));
+    
+    // 10ms timeout.
     struct timespec timeout = (struct timespec) {
         .tv_sec = 0,
-        .tv_nsec = 100000000
+        .tv_nsec = 10000000
     };
     int res = io_getevents(queue->ctx, 1, queue->bdev->queue_depth, queue->events, &timeout);
     if (res < 0) {
         return -1;
     }
+    if (res == 0) {
+        return 0;
+    }
+
+    uint64_t nevents;
+    read(queue->eventfd, &nevents, sizeof(nevents));
+
     for (int j = 0; j < res; j++) {
         uint32_t tag = (uint32_t) (uintptr_t) queue->events[j].data;
         aio_bdev_io_t *io = &queue->ios[tag];

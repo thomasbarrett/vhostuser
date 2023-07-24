@@ -66,7 +66,7 @@ void* io_thread_run(void *arg) {
 
     close(epollfd);
 
-    info("io_thread exiting: index %d\n", ctx->index);
+    info("io_thread exiting: index %d", ctx->index);
 
     return NULL;
 }
@@ -94,7 +94,7 @@ int main(void) {
 
     signal(SIGINT, handle_sigint);
 
-    if (metric_client_init(&metric_client) < 0) {
+    if (metric_client_init(&metric_client, 8888) < 0) {
         return -1;
     }
 
@@ -107,6 +107,10 @@ int main(void) {
         return -1;
     }
 
+    if (metric_client_epoll_register(&metric_client, epollfd) < 0) {
+        return -1;
+    }
+    
     if (vhost_user_device_epoll_register(&vhost_user_device, epollfd) < 0) {
         return -1;
     }

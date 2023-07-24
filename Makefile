@@ -1,5 +1,6 @@
 CC=clang
-CFLAGS = -std=c11 -Wall -pedantic -Iinclude -Wall -g -Wno-address-of-packed-member -fsanitize=address
+# CFLAGS = -std=c11 -Wall -pedantic -Iinclude -Wall -O0 -g -Wno-address-of-packed-member -fsanitize=address
+CFLAGS = -std=c11 -Wall -pedantic -Iinclude -Wall -O3 -Wno-address-of-packed-member
 SRC_FILES = $(wildcard src/*.c)  $(wildcard src/*/*.c)
 FILES = $(basename $(SRC_FILES:src/%=%))
 OBJ_FILES = $(addprefix obj/,$(FILES:=.o))
@@ -7,7 +8,7 @@ TEST_FILES = $(addprefix bin/,$(basename $(wildcard tests/*.c) $(wildcard tests/
 VERSION = v0.1.0
 
 .PHONY: all
-all: bin/example $(TEST_FILES)
+all: bin/example bin/http $(TEST_FILES)
 
 .PHONY: clean
 clean:
@@ -26,6 +27,10 @@ bin/tests/%: tests/%.c
 	@$(CC) $(CFLAGS) -I. -fprofile-instr-generate -fcoverage-mapping $$(cat $^ | grep '// CFLAGS:' |  cut -d':' -f2-) $^ -o $@
 
 bin/example: main/example.c $(OBJ_FILES)
+	@mkdir -p $(dir $@)
+	@$(CC) $(CFLAGS) $^ -o $@ -laio
+
+bin/http: main/http.c $(OBJ_FILES)
 	@mkdir -p $(dir $@)
 	@$(CC) $(CFLAGS) $^ -o $@ -laio
 
