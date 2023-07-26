@@ -8,12 +8,12 @@
 
 #include <sys/sysinfo.h>
 #include <vhost-user.h>
-#include <guest_memory.h>
+#include <guest.h>
 #include <bdev.h>
 #include <virtio-core.h>
 #include <virtio-blk.h>
 #include <log.h>
-#include <task_queue.h>
+#include <task.h>
 
 #define SERVER_SOCK_FILE "/tmp/vhost-blk.sock"
 
@@ -50,7 +50,7 @@ void* io_thread_run(void *arg) {
     const size_t EPOLL_MAX_EVENTS = 16;
     int EPOLL_TIMEOUT_MS = 100;
     struct epoll_event events[EPOLL_MAX_EVENTS];
-    while (!ctx->task_queue.done) {
+    while (!task_queue_done(&ctx->task_queue)) {
         int n = epoll_wait(epollfd, events, EPOLL_MAX_EVENTS, EPOLL_TIMEOUT_MS);
         if (n < 0) {
             return (void*) (uintptr_t) -1ULL;
@@ -89,16 +89,38 @@ int main(void) {
         task_queues[i] = &io_thread_ctx[i].task_queue;
     }
 
-    vhost_user_device_t vhost_user_device;
     metric_client_t metric_client;
-
-    signal(SIGINT, handle_sigint);
-
     if (metric_client_init(&metric_client, 8888) < 0) {
         return -1;
     }
 
-    if (vhost_user_device_init(&vhost_user_device, &metric_client, SERVER_SOCK_FILE, 4, 128, task_queues, thread_count) < 0) {
+    aio_bdev_t aio_bdev;
+    int res = aio_bdev_init(&aio_bdev, "/dev/nvme1n1", 4, 128);
+    if (res < 0) {
+        return -1;
+    }
+    bdev_t bdev = (bdev_t) {
+        .self = &aio_bdev,
+        .vtable = &aio_bdev_vtable,
+    };
+
+    virtio_blk_device_t virtio_blk_device;
+    if (virtio_blk_device_init(&virtio_blk_device, bdev) < 0) {
+        return -1;
+    }
+
+    virtio_blk_device_metrics_register(&virtio_blk_device, &metric_client);
+
+    signal(SIGINT, handle_sigint);
+
+ 
+    virtio_device_t device = (virtio_device_t){
+        .self = &virtio_blk_device,
+        .vtable = &virtio_blk_vtable,
+    };
+
+    vhost_user_device_t vhost_user_device;
+    if (vhost_user_device_init(&vhost_user_device, &metric_client, SERVER_SOCK_FILE, device, 128, task_queues, thread_count) < 0) {
         return -1;
     }
 
@@ -146,6 +168,12 @@ int main(void) {
 
     vhost_user_device_deinit(&vhost_user_device);
 
+    virtio_blk_device_metrics_deregister(&virtio_blk_device, &metric_client);
+
+    virtio_blk_device_deinit(&virtio_blk_device);
+
+    aio_bdev_deinit(&aio_bdev);
+    
     metric_client_deinit(&metric_client);
 
 	return 0;

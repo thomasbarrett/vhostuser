@@ -1,8 +1,8 @@
 #define _GNU_SOURCE
 #include <virtio-core.h>
-#include <task_queue.h>
+#include <task.h>
 #include <bdev.h>
-#include <guest_memory.h>
+#include <guest.h>
 
 #include <stdatomic.h>
 #include <unistd.h>
@@ -14,6 +14,14 @@
 #include <log.h>
 #include <errno.h>
 
+typedef struct virtio_ctx {
+    struct vring vring;
+    desc_state_t *desc;
+    __virtio32 id;
+    __virtio32 len;
+    int eventfd;
+} virtio_ctx_t;
+
 static void vring_used_push(struct vring vring, desc_state_t *desc, __virtio32 id, __virtio32 len) {
    vring.used->ring[vring.used->idx % vring.num] = (vring_used_elem_t) {
         .id = id,
@@ -24,7 +32,7 @@ static void vring_used_push(struct vring vring, desc_state_t *desc, __virtio32 i
     vring.used->idx++;
 }
 
-int virtio_done(virtio_ctx_t *ctx) {
+int virtio_done(virtio_ctx_t *ctx, int _) {
     vring_used_push(ctx->vring, ctx->desc, ctx->id, ctx->len);
     if (write(ctx->eventfd, &(uint64_t){1}, sizeof(uint64_t)) < 0) {
         printf("ERROR: failed to write to eventfd\n");
@@ -50,38 +58,12 @@ int virt_queue_read_desc_direct(guest_memory_t *mem, vring_desc_t *desc, struct 
     return 1;
 }
 
-int virt_queue_read_desc_indirect(guest_memory_t *mem, vring_desc_t *desc, struct iovec *iov, size_t i, size_t n) {
-    size_t iter = i;
-
-    vring_desc_t *indirect_desc_table;
-    if (guest_memory_guest_to_addr(mem, desc->addr, (void **) &indirect_desc_table) < 0) {
-        error("Failed to translate address: %p", desc->addr);
-        return -1;
-    }
-
-    for (size_t j = 0; j < desc->len / sizeof(vring_desc_t); j++) {
-        int res = virt_queue_read_desc_direct(mem, &indirect_desc_table[j], iov, iter, n);
-        if (res < 0) return -1;
-        iter += res;
-    }
-    
-    return iter - i;
-}
-
-int virt_queue_read_desc(guest_memory_t *mem, vring_desc_t *desc, struct iovec *iov, size_t i, size_t n) {
-    if (desc->flags & VRING_DESC_F_INDIRECT) {
-        return virt_queue_read_desc_indirect(mem, desc, iov, i, n);
-    } else {
-        return virt_queue_read_desc_direct(mem, desc, iov, i, n);
-    }
-}
-
 int virt_queue_handle(virt_queue_t *queue, __virtio16 id) {
     struct iovec iov[130];
     size_t len = 0;
     uint32_t i = id;        
     while (queue->vring.desc[i].flags & VRING_DESC_F_NEXT) {
-        int res = virt_queue_read_desc(queue->guest_memory, &queue->vring.desc[i], iov, len, 130);
+        int res = virt_queue_read_desc_direct(queue->guest_memory, &queue->vring.desc[i], iov, len, 130);
         if (res < 0) {
             error("failed to read desc");
             return -1;
@@ -94,7 +76,7 @@ int virt_queue_handle(virt_queue_t *queue, __virtio16 id) {
             return -1;
         }
     }
-    int res = virt_queue_read_desc(queue->guest_memory, &queue->vring.desc[i], iov, len, 130);
+    int res = virt_queue_read_desc_direct(queue->guest_memory, &queue->vring.desc[i], iov, len, 130);
     if (res < 0) {
         error("failed to read desc");
         return -1;
@@ -110,13 +92,13 @@ int virt_queue_handle(virt_queue_t *queue, __virtio16 id) {
 
     // The back-end must process the ring without causing any side effects.
     if (queue->state == QUEUE_STATE_ENABLED || queue->state == QUEUE_STATE_DISABLED) {
-        if (device_queue_handle(queue->impl, iov, len, virtio_ctx) < 0) {
+        if (virtio_device_queue_handle(queue->device_queue, iov, len, (task_t){.self = virtio_ctx, .call = (int (*)(void *, int)) virtio_done}) < 0) {
             error("received invalid buffer from driver");
-            virtio_done(virtio_ctx);
+            virtio_done(virtio_ctx, -1);
         }
     } else {
         warn("recieved buffers from driver while device stopped");
-        virtio_done(virtio_ctx);
+        virtio_done(virtio_ctx, -1);
     }
     
     return 0;
@@ -148,7 +130,7 @@ int virt_queue_epoll_register(virt_queue_t *queue, int epollfd) {
         return -1;
     }
 
-    if (device_queue_epoll_register(queue->impl, epollfd) < 0) {
+    if (virtio_device_queue_epoll_register(queue->device_queue, epollfd) < 0) {
         error("Failed to register device queue with epoll interface");
         return -1;
     }
@@ -163,7 +145,7 @@ int virt_queue_epoll_deregister(virt_queue_t *queue, int epollfd) {
         return -1;
     }
 
-    if (device_queue_epoll_deregister(queue->impl, epollfd) < 0) {
+    if (virtio_device_queue_epoll_deregister(queue->device_queue, epollfd) < 0) {
         error("Failed to deregister device queue from epoll interface");
         return -1;
     }
@@ -202,10 +184,10 @@ int virt_queue_poll(virt_queue_t *queue, int _) {
     return 0;
 }
 
-void virt_queue_init(virt_queue_t *queue, metric_client_t *metric_client, guest_memory_t *guest_memory, device_queue_t *impl, int i) {
+int virt_queue_init(virt_queue_t *queue, metric_client_t *metric_client, guest_memory_t *guest_memory, virtio_device_queue_t device_queue, int i) {
     queue->index = i;
     queue->guest_memory = guest_memory;
-    queue->impl = impl;
+    queue->device_queue = device_queue;
 
     queue->state = QUEUE_STATE_DISABLED;
 
@@ -224,6 +206,8 @@ void virt_queue_init(virt_queue_t *queue, metric_client_t *metric_client, guest_
     snprintf(label.val, METRICS_MAX_LABEL_VAL_SIZE, "%d", i);
     metric_counter_init(&queue->kick_count, "vhost_user_queue_kick", &label, 1);
     metric_client_register(queue->metric_client, &queue->kick_count.metric);
+
+    return 0;
 }
 
 void virt_queue_deinit(virt_queue_t *queue) {

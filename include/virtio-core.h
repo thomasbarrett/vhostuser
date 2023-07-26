@@ -2,8 +2,8 @@
 #define VIRTIO_CORE_H
 
 #include <linux/virtio_ring.h>
-#include <task_queue.h>
-#include <guest_memory.h>
+#include <task.h>
+#include <guest.h>
 #include <bdev.h>
 #include <metrics.h>
 
@@ -18,31 +18,39 @@ typedef struct queue_state {
     desc_state_t desc[];
 } queue_state_t;
 
-typedef struct virtio_ctx {
-    struct vring vring;
-    desc_state_t *desc;
-    __virtio32 id;
-    __virtio32 len;
-    int eventfd;
-} virtio_ctx_t;
-
-int virtio_done(virtio_ctx_t *ctx);
-
 struct device_queue;
 
-typedef struct device_queue_vtable {
-    int (*epoll_register)(struct device_queue *queue, int epollfd);
-    int (*epoll_deregister)(struct device_queue *queue, int epollfd);
-    int (*handle)(struct device_queue *queue, struct iovec *iov, size_t iov_len, virtio_ctx_t *virtio_ctx);
-} device_queue_vtable_t;
+typedef struct virtio_device_queue_vtable {
+    int (*epoll_register)(void *self, int epollfd);
+    int (*epoll_deregister)(void *self, int epollfd);
+    int (*handle)(void *self, struct iovec *iov, size_t iov_len, task_t task);
+} virtio_device_queue_vtable_t;
 
-#define device_queue_epoll_register(queue, ...) (queue->vtable.epoll_register(queue, __VA_ARGS__))
-#define device_queue_epoll_deregister(queue, ...) (queue->vtable.epoll_deregister(queue, __VA_ARGS__))
-#define device_queue_handle(queue, ...) (queue->vtable.handle(queue, __VA_ARGS__))
+typedef struct virtio_device_queue {
+    void *self;
+    virtio_device_queue_vtable_t *vtable;
+} virtio_device_queue_t;
 
-typedef struct device_queue {
-    device_queue_vtable_t vtable;
-} device_queue_t;
+#define virtio_device_queue_epoll_register(device_queue, ...) (device_queue.vtable->epoll_register(device_queue.self, __VA_ARGS__))
+#define virtio_device_queue_epoll_deregister(device_queue, ...) (device_queue.vtable->epoll_deregister(device_queue.self, __VA_ARGS__))
+#define virtio_device_queue_handle(device_queue, ...) (device_queue.vtable->handle(device_queue.self, __VA_ARGS__))
+
+typedef struct virtio_device_vtable {
+    int (*queue_count)(void *self);
+    virtio_device_queue_t (*queue)(void *self, int i);
+    ssize_t (*config_read)(void *self, void *buf, size_t count, off_t offset);
+    uint64_t (*get_features)(void *self);
+} virtio_device_vtable_t;
+
+typedef struct virtio_device {
+    void *self;
+    virtio_device_vtable_t *vtable;
+} virtio_device_t;
+
+#define virtio_device_queue(device, ...) (device.vtable->queue(device.self, __VA_ARGS__))
+#define virtio_device_get_features(device) (device.vtable->get_features(device.self))
+#define virtio_device_queue_count(device) (device.vtable->queue_count(device.self))
+#define virtio_device_config_read(device, ...) (device.vtable->config_read(device.self, __VA_ARGS__))
 
 #define QUEUE_STATE_STOPPED    -1
 #define QUEUE_STATE_DISABLED   0
@@ -66,7 +74,7 @@ typedef struct virt_queue {
 
     guest_memory_t *guest_memory;
     
-    device_queue_t *impl;
+    virtio_device_queue_t device_queue;
     
     metric_client_t *metric_client;
     metric_counter_t kick_count;
@@ -80,7 +88,7 @@ typedef struct virt_queue {
  * \param impl: the device queue.
  * \param i: the queue index.
  */
-void virt_queue_init(virt_queue_t *queue, metric_client_t *metric_client, guest_memory_t *guest_memory, device_queue_t *impl, int i);
+int virt_queue_init(virt_queue_t *queue, metric_client_t *metric_client, guest_memory_t *guest_memory, virtio_device_queue_t device_queue, int i);
 
 /**
  * Deinitialize the virt_queue_t.

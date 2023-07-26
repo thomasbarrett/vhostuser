@@ -1,4 +1,4 @@
-#include <guest_memory.h>
+#include <guest.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <assert.h>

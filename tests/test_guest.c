@@ -1,5 +1,5 @@
 // CFLAGS: -Wl,--wrap=mmap -Wl,--wrap=munmap -Wl,--wrap=close
-#include <src/guest_memory.c>
+#include <src/guest.c>
 #include <assert.h>
 
 void* __wrap_mmap(void *addr, size_t len, int prot, int flags, int fd, __off_t offset) {

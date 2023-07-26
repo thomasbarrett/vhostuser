@@ -1,7 +1,7 @@
 #ifndef HTTP_H
 #define HTTP_H
 
-#include <task_queue.h>
+#include <task.h>
 #include <stdint.h>
 #include <stddef.h>
 

@@ -1,9 +1,9 @@
 #ifndef VHOSTUSER_H
 #define VHOSTUSER_H
 
-#include <guest_memory.h>
+#include <guest.h>
 #include <virtio-core.h>
-#include <linux/virtio_blk.h>
+#include <virtio-blk.h>
 
 #include <stdint.h>
 #include <linux/vhost_types.h>
@@ -160,9 +160,8 @@ typedef struct vhost_user_device {
     uint32_t acked_protocol_features;
 
     int used_fd;
-    struct virtio_blk_config config;
 
-    bdev_t *bdev;
+    virtio_device_t device;
 
     size_t queue_count;
     size_t queue_depth;
@@ -186,7 +185,7 @@ typedef struct vhost_user_device {
     } read_state;
 } vhost_user_device_t;
 
-int vhost_user_device_init(vhost_user_device_t *dev, metric_client_t *metric_client, const char *sock_path, size_t queue_count, size_t queue_depth, task_queue_t **task_queues, size_t task_queue_count);
+int vhost_user_device_init(vhost_user_device_t *dev, metric_client_t *metric_client, const char *sock_path, virtio_device_t device, size_t queue_depth, task_queue_t **task_queues, size_t task_queue_count);
 void vhost_user_device_deinit(vhost_user_device_t *dev);
 int vhost_user_device_handle(vhost_user_device_t *dev, vhost_user_message_t *msg, int *fd);
 int vhost_user_device_poll(vhost_user_device_t *dev, int _);

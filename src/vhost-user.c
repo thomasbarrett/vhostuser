@@ -1,9 +1,7 @@
 #define _GNU_SOURCE
 #include <vhost-user.h>
-#include <virtio-blk.h>
-#include <bdev.h>
 #include <log.h>
-#include <guest_memory.h>
+#include <guest.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -11,7 +9,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
-#include <linux/virtio_blk.h>
+#include <linux/vhost_types.h>
 #include <sys/epoll.h>
 #include <sys/un.h>
 #include <fcntl.h>
@@ -81,28 +79,21 @@ void vhost_vring_addr_debug(struct vhost_vring_addr *vra) {
     );
 }
 
-int vhost_user_device_init(vhost_user_device_t *dev, metric_client_t *metric_client, const char *sock_path, size_t queue_count, size_t queue_depth, task_queue_t **task_queues, size_t task_queue_count) {
+int vhost_user_device_init(vhost_user_device_t *dev, metric_client_t *metric_client, const char *sock_path, virtio_device_t device, size_t queue_depth, task_queue_t **task_queues, size_t task_queue_count) {
     memset(dev, 0, sizeof(vhost_user_device_t));
-    dev->bdev = aio_bdev_create("/dev/nvme0n1", queue_count, queue_depth);
-    if (dev->bdev == NULL) {
-        goto error0;
-    }
-    
-    dev->config.capacity = 1875385008;
-    dev->config.num_queues = queue_count;
-    dev->config.size_max = 16384;
-    dev->config.seg_max = 32;
+    dev->device = device;
     dev->client_fd = -1;
     dev->status = 0;
-
-    if (guest_memory_init(&dev->guest_memory) < 0) {
-        goto error1;
-    }
     dev->queue_depth = queue_depth;
-    for (size_t i = 0; i < queue_count; i++) {
-        virtio_blk_queue_t *queue = virtio_blk_queue_create(bdev_get_queue(dev->bdev, i), i, metric_client);
-        if (queue == NULL) goto error2;
-        virt_queue_init(&dev->queues[i], metric_client, &dev->guest_memory, (device_queue_t*) queue, i);
+    if (guest_memory_init(&dev->guest_memory) < 0) {
+        goto error0;
+    }
+
+    for (size_t i = 0; i < virtio_device_queue_count(device); i++) {
+        virtio_device_queue_t queue = virtio_device_queue(dev->device, i);
+        if (virt_queue_init(&dev->queues[i], metric_client, &dev->guest_memory, queue, i) < 0) {
+            goto error1;
+        }
         dev->queue_count++;
     }
     
@@ -138,27 +129,20 @@ int vhost_user_device_init(vhost_user_device_t *dev, metric_client_t *metric_cli
 
     return 0;
 
-error2:
+error1:
     for (size_t i = 0; i < dev->queue_count; i++) {
-        virtio_blk_queue_t *queue = (virtio_blk_queue_t *) &dev->queues[i].impl;
         virt_queue_deinit(&dev->queues[i]);
-        virtio_blk_queue_destroy(queue);
     }
     guest_memory_deinit(&dev->guest_memory);
-error1:
-    aio_bdev_destroy(dev->bdev);
 error0:
     return -1;
 }
 
 void vhost_user_device_deinit(vhost_user_device_t *dev) {
     for (size_t i = 0; i < dev->queue_count; i++) {
-        virtio_blk_queue_t *queue = (virtio_blk_queue_t *) dev->queues[i].impl;
         virt_queue_deinit(&dev->queues[i]);
-        virtio_blk_queue_destroy(queue);
     }
     guest_memory_deinit(&dev->guest_memory);
-    aio_bdev_destroy(dev->bdev);
 }
 
 int vhost_user_write(vhost_user_device_t *dev, vhost_user_message_t *resp) {
@@ -219,12 +203,8 @@ int vhost_user_device_get_features(vhost_user_device_t *dev, vhost_user_message_
     resp.header.flags = VHOST_USER_HEADER_FLAGS_V1 | VHOST_USER_HEADER_FLAGS_REPLY;
     resp.header.size = sizeof(uint64_t);
     resp.header.request = req->header.request;
-    resp.body.u64 = 1ULL << VIRTIO_F_VERSION_1 |
-                    // 1ULL << VIRTIO_RING_F_INDIRECT_DESC |
-                    1ULL << VHOST_USER_F_PROTOCOL_FEATURES |
-                    1ULL << VIRTIO_BLK_F_MQ |
-                    1ULL << VIRTIO_BLK_F_SIZE_MAX |
-                    1ULL << VIRTIO_BLK_F_SEG_MAX;
+    resp.body.u64 = 1ULL << VHOST_USER_F_PROTOCOL_FEATURES |
+                    virtio_device_get_features(dev->device);
 
     if (vhost_user_write(dev, &resp) < 0) {
         return -1;
@@ -335,8 +315,14 @@ int vhost_user_device_get_config(vhost_user_device_t *dev, vhost_user_message_t 
     resp->header.request = req->header.request;
     resp->body.config.offset = req->body.config.offset;
     resp->body.config.size = req->body.config.size;
-    memcpy(&resp->body.config + 1, &((uint8_t*) &dev->config)[req->body.config.offset], req->body.config.size);
+    ssize_t res = virtio_device_config_read(dev->device, &resp->body.config + 1, req->body.config.size, req->body.config.offset);
+    if (res < req->body.config.size) {
+        error("Failed to read virtio-blk device config");
+        return -1;
+    }
+
     if (vhost_user_write(dev, resp) < 0) {
+        error("Failed to write response");
         return -1;
     }
 
@@ -528,7 +514,6 @@ error0:
     close(fd);
     return -1;
 }
-
 
 int vhost_user_device_get_status(vhost_user_device_t *dev, vhost_user_message_t *req) {   
     vhost_user_message_t resp = {0};

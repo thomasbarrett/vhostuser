@@ -7,59 +7,129 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <assert.h>
 
 #include <sys/epoll.h>
 #include <linux/virtio_blk.h>
 
-device_queue_vtable_t virtio_blk_device_queue_vtable = {
-    .epoll_register = virtio_blk_queue_epoll_register,
-    .epoll_deregister = virtio_blk_queue_epoll_deregister,
-    .handle = virtio_blk_queue_handle,
+int virtio_blk_device_init(virtio_blk_device_t *dev, bdev_t bdev) {
+    memset(dev, 0, sizeof(virtio_blk_device_t));
+    dev->bdev = bdev;
+    dev->queues = calloc(bdev_queue_count(bdev), sizeof(virtio_blk_queue_t));
+    if (dev->queues == NULL) {
+        goto error0;
+    }
+    for (size_t i = 0; i < bdev_queue_count(bdev); i++) {   
+        if (virtio_blk_queue_init(&dev->queues[i],  bdev_get_queue(bdev, i), dev, i) < 0) {
+            goto error1;
+        }
+        dev->queue_count++;
+    }
+
+    dev->config.capacity = 1875385008;
+    dev->config.num_queues = dev->queue_count;
+    dev->config.size_max = 16384;
+    dev->config.seg_max = 32;
+
+    return 0;
+error1:
+    for (size_t i = 0; i < dev->queue_count; i++) {
+        virtio_blk_queue_deinit(&dev->queues[i]);
+    }
+error0:
+    return -1;
+}
+
+void virtio_blk_device_deinit(virtio_blk_device_t *dev) {
+    for (size_t i = 0; i < dev->queue_count; i++) {
+        virtio_blk_queue_deinit(&dev->queues[i]);
+    }
+    free(dev->queues);
+}
+
+ssize_t virtio_blk_device_config_read(virtio_blk_device_t *dev, void *buf, size_t count, off_t offset) {
+    if (offset + count > sizeof(struct virtio_blk_config)) {
+        return -EINVAL;
+    }
+
+    memcpy(buf, ((char *) &dev->config) + offset, count);
+    return count;
+}
+
+int virtio_blk_device_queue_count(virtio_blk_device_t *dev) {
+    return dev->queue_count;
+}
+
+uint64_t virtio_blk_device_get_features(virtio_blk_device_t *dev) {
+    return  1ULL << VIRTIO_F_VERSION_1 |
+            1ULL << VIRTIO_BLK_F_MQ |
+            1ULL << VIRTIO_BLK_F_SIZE_MAX |
+            1ULL << VIRTIO_BLK_F_SEG_MAX;
+}
+
+virtio_device_queue_t virtio_blk_device_queue(virtio_blk_device_t *dev, int i) {
+    assert(dev->queue_count > i);
+    return (virtio_device_queue_t) {
+        .self= &dev->queues[i],
+        .vtable = &virtio_blk_queue_vtable,
+    };
+}
+
+int virtio_blk_device_metrics_register(virtio_blk_device_t *dev, metric_client_t *metric_client) {
+    for (size_t i = 0; i < dev->queue_count; i++) {
+        virtio_blk_queue_metrics_register(&dev->queues[i], metric_client);
+    }
+
+    return 0;
+}
+
+int virtio_blk_device_metrics_deregister(virtio_blk_device_t *dev, metric_client_t *metric_client) {
+    for (size_t i = 0; i < dev->queue_count;  i++) {
+        virtio_blk_queue_metrics_deregister(&dev->queues[i], metric_client);
+    }
+
+    return 0;
+}
+
+virtio_device_queue_vtable_t virtio_blk_queue_vtable = {
+    .epoll_register = (int (*)(void *self, int epollfd)) virtio_blk_queue_epoll_register,
+    .epoll_deregister = (int (*)(void *self, int epollfd))virtio_blk_queue_epoll_deregister,
+    .handle = (int (*)(void *self, struct iovec *iov, size_t iovcnt, task_t task)) virtio_blk_queue_handle,
 };
 
-virtio_blk_queue_t* virtio_blk_queue_create(bdev_queue_t *bdev_queue, int i, metric_client_t *metric_client) {
-    virtio_blk_queue_t *queue = calloc(1, sizeof(virtio_blk_queue_t));
-    if (queue == NULL) return NULL;
-    queue->vtable = virtio_blk_device_queue_vtable,
+virtio_device_vtable_t virtio_blk_vtable = {
+    .queue = (virtio_device_queue_t (*)(void*, int)) virtio_blk_device_queue,
+    .queue_count = (int (*)(void*)) virtio_blk_device_queue_count,
+    .config_read = (ssize_t (*)(void*, void*, size_t, off_t)) virtio_blk_device_config_read,
+};
+
+int virtio_blk_queue_init(virtio_blk_queue_t *queue, bdev_queue_t bdev_queue, virtio_blk_device_t *dev, int i) {
+    memset(queue, 0, sizeof(virtio_blk_queue_t));
     queue->bdev_queue = bdev_queue;
     queue->poll = (task_t) {
         .self = (void*) queue,
         .call = (int (*)(void*, int))(virtio_blk_queue_poll),
     };
-    
-    queue->metrics_client = metric_client;
+    queue->device = dev;
 
     metric_label_t label = {0};
     strcpy(label.key, "queue");
     snprintf(label.val, METRICS_MAX_LABEL_VAL_SIZE, "%d", i);
     metric_counter_init(&queue->read_bytes_count, "virtio_blk_read_bytes", &label, 1);
-    metric_client_register(metric_client, &queue->read_bytes_count.metric);
-
     metric_counter_init(&queue->reads_completed_count, "virtio_blk_reads_completed", &label, 1);
-    metric_client_register(metric_client, &queue->reads_completed_count.metric);
-
     metric_counter_init(&queue->written_bytes_count, "virtio_blk_written_bytes", &label, 1);
-    metric_client_register(metric_client, &queue->written_bytes_count.metric);
-
     metric_counter_init(&queue->writes_completed_count, "virtio_blk_writes_completed", &label, 1);
-    metric_client_register(metric_client, &queue->writes_completed_count.metric);
 
-    return queue;
+    return 0;
 }
 
-void virtio_blk_queue_destroy(virtio_blk_queue_t *queue) {
-    metric_client_deregister(queue->metrics_client, &queue->writes_completed_count.metric);
-    metric_client_deregister(queue->metrics_client, &queue->written_bytes_count.metric);
-    metric_client_deregister(queue->metrics_client, &queue->reads_completed_count.metric);
-    metric_client_deregister(queue->metrics_client, &queue->read_bytes_count.metric);
-    free(queue);
-}
+void virtio_blk_queue_deinit(virtio_blk_queue_t *self) {}
 
 typedef struct virtio_blk_io_ctx {
     virtio_blk_queue_t *queue;
     uint8_t *res;
     uint32_t command;
-    virtio_ctx_t *virtio_ctx;
+    task_t done_task;
     size_t size;
     size_t sector;
 } virtio_blk_io_ctx_t;
@@ -81,7 +151,7 @@ void virtio_blk_io_cb(void *ctx, ssize_t res) {
     } else {
         *(io_ctx->res) = VIRTIO_BLK_S_IOERR;
     }
-    virtio_done(io_ctx->virtio_ctx);
+    io_ctx->done_task.call(io_ctx->done_task.self, -1);
     free(io_ctx);
 }
 
@@ -94,18 +164,18 @@ static size_t get_iov_len(struct iovec *iov, size_t iov_len) {
     return res;
 }
 
-void virtio_blk_handle_req(virtio_blk_queue_t *queue, struct virtio_blk_outhdr *hdr, struct iovec *iov, size_t iovcnt, uint8_t *res, virtio_ctx_t *virtio_ctx) {
-    bdev_queue_t *bdev_queue = queue->bdev_queue;
+void virtio_blk_handle_req(virtio_blk_queue_t *queue, struct virtio_blk_outhdr *hdr, struct iovec *iov, size_t iovcnt, uint8_t *res, task_t done_task) {
+    bdev_queue_t bdev_queue = queue->bdev_queue;
     switch (hdr->type) {
     case VIRTIO_BLK_T_IN:
         {
-            if (iovcnt == 1 && !bdev_queue->vtable.read) break;
-            if (iovcnt > 1 && !bdev_queue->vtable.readv) break;
+            if (iovcnt == 1 && !bdev_queue.vtable->read) break;
+            if (iovcnt > 1 && !bdev_queue.vtable->readv) break;
             virtio_blk_io_ctx_t *io_ctx = calloc(1, sizeof(virtio_blk_io_ctx_t));
             io_ctx->queue = queue;
             io_ctx->res = res;
             io_ctx->command = hdr->type;
-            io_ctx->virtio_ctx = virtio_ctx;
+            io_ctx->done_task = done_task;
             io_ctx->size = get_iov_len(iov, iovcnt);
             io_ctx->sector = hdr->sector;
             if (iovcnt == 1) {
@@ -117,13 +187,13 @@ void virtio_blk_handle_req(virtio_blk_queue_t *queue, struct virtio_blk_outhdr *
         }
     case VIRTIO_BLK_T_OUT:
         {
-            if (iovcnt == 1 && !bdev_queue->vtable.write) break;
-            if (iovcnt > 1 && !bdev_queue->vtable.writev) break;
+            if (iovcnt == 1 && !bdev_queue.vtable->write) break;
+            if (iovcnt > 1 && !bdev_queue.vtable->writev) break;
             virtio_blk_io_ctx_t *io_ctx = calloc(1, sizeof(virtio_blk_io_ctx_t));
             io_ctx->queue = queue;
             io_ctx->res = res;
             io_ctx->command = hdr->type;
-            io_ctx->virtio_ctx = virtio_ctx;
+            io_ctx->done_task = done_task;
             io_ctx->size = get_iov_len(iov, iovcnt);
             io_ctx->sector = hdr->sector;
             if (iovcnt == 1) {
@@ -135,12 +205,12 @@ void virtio_blk_handle_req(virtio_blk_queue_t *queue, struct virtio_blk_outhdr *
         }
     case VIRTIO_BLK_T_FLUSH:
         {
-            if (!bdev_queue->vtable.flush) break;
+            if (!bdev_queue.vtable->flush) break;
             virtio_blk_io_ctx_t *io_ctx = calloc(1, sizeof(virtio_blk_io_ctx_t));
             io_ctx->queue = queue;
             io_ctx->res = res;
             io_ctx->command = hdr->type;
-            io_ctx->virtio_ctx = virtio_ctx;
+            io_ctx->done_task = done_task;
             io_ctx->size = 0;
             io_ctx->sector = hdr->sector;
             bdev_queue_flush(bdev_queue, virtio_blk_io_cb, io_ctx);
@@ -149,12 +219,12 @@ void virtio_blk_handle_req(virtio_blk_queue_t *queue, struct virtio_blk_outhdr *
     case VIRTIO_BLK_T_GET_ID:
         memcpy(iov[1].iov_base, "hello", strlen("hello"));
         *res = VIRTIO_BLK_S_OK;
-        virtio_done(virtio_ctx);
+        done_task.call(done_task.self, -1);
         return;       
     }
 
     *res = VIRTIO_BLK_S_UNSUPP;
-    virtio_done(virtio_ctx);
+    done_task.call(done_task.self, -1);
 }
 
 void virtio_blk_outhdr_debug(struct virtio_blk_outhdr *hdr) {
@@ -178,13 +248,11 @@ int virtio_blk_queue_poll(virtio_blk_queue_t *queue, int _) {
     return 0;
 }
 
-int virtio_blk_queue_epoll_register(struct device_queue *queue, int epollfd) {
-    virtio_blk_queue_t *virtio_blk_queue = (virtio_blk_queue_t*) queue;
-
+int virtio_blk_queue_epoll_register(virtio_blk_queue_t *queue, int epollfd) {
     struct epoll_event event = {0};
-    int fd = bdev_queue_eventfd(virtio_blk_queue->bdev_queue);
+    int fd = bdev_queue_eventfd(queue->bdev_queue);
     event.events = EPOLLIN;
-    event.data.ptr = &virtio_blk_queue->poll;
+    event.data.ptr = &queue->poll;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event) == -1) {
         error("Failed to add fd to epoll interface: %s", strerror(errno));
         return -1;
@@ -193,10 +261,8 @@ int virtio_blk_queue_epoll_register(struct device_queue *queue, int epollfd) {
     return 0;
 }
 
-int virtio_blk_queue_epoll_deregister(struct device_queue *queue, int epollfd) {
-    virtio_blk_queue_t *virtio_blk_queue = (virtio_blk_queue_t*) queue;
-
-    int fd = bdev_queue_eventfd(virtio_blk_queue->bdev_queue);
+int virtio_blk_queue_epoll_deregister(virtio_blk_queue_t*queue, int epollfd) {
+    int fd = bdev_queue_eventfd(queue->bdev_queue);
     if (epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL) == -1) {
         error("Failed to remove fd to epoll interface: %s", strerror(errno));
         return -1;
@@ -205,8 +271,7 @@ int virtio_blk_queue_epoll_deregister(struct device_queue *queue, int epollfd) {
     return 0;
 }
 
-int virtio_blk_queue_handle(device_queue_t *queue, struct iovec *iov, size_t iovcnt, virtio_ctx_t *virtio_ctx) {
-    virtio_blk_queue_t *virtio_blk_queue = (virtio_blk_queue_t*) queue;
+int virtio_blk_queue_handle(virtio_blk_queue_t *queue, struct iovec *iov, size_t iovcnt, task_t task) {
     /* All virtio-blk requests must include at least a header and a status byte. */
     if (iovcnt < 2) {
         error("Received virtio-blk message with unsupported framing: iovcnt=%d", iovcnt);
@@ -222,7 +287,7 @@ int virtio_blk_queue_handle(device_queue_t *queue, struct iovec *iov, size_t iov
         error("Received virtio-blk message with unsupported framing: iov[iovcnt - 1].iov_len=%d", iov[iovcnt - 1].iov_len);
         return -1;
     }
-    
+
     struct iovec *data_iov = NULL;
     size_t data_iovcnt = iovcnt - 2;
     if (data_iovcnt > 0) {
@@ -230,7 +295,37 @@ int virtio_blk_queue_handle(device_queue_t *queue, struct iovec *iov, size_t iov
     }
 
     struct virtio_blk_outhdr* hdr = (struct virtio_blk_outhdr*) iov[0].iov_base;
-    virtio_blk_handle_req(virtio_blk_queue, hdr, data_iov, data_iovcnt, (uint8_t*) iov[iovcnt - 1].iov_base, virtio_ctx); 
+    virtio_blk_handle_req(queue, hdr, data_iov, data_iovcnt, (uint8_t*) iov[iovcnt - 1].iov_base, task); 
     
     return 0;   
+}
+
+int virtio_blk_queue_metrics_register(virtio_blk_queue_t *queue, metric_client_t *metric_client) {
+    metric_t *metrics[] = {
+        &queue->read_bytes_count.metric,
+        &queue->reads_completed_count.metric,
+        &queue->written_bytes_count.metric,
+        &queue->writes_completed_count.metric
+    };
+
+    for (size_t i = 0; i < sizeof(metrics) / sizeof(metrics[0]); i++) {
+        metric_client_register(metric_client, metrics[i]);
+    }
+
+    return 0;
+}
+
+int virtio_blk_queue_metrics_deregister(virtio_blk_queue_t *queue, metric_client_t *metric_client) {
+     metric_t *metrics[] = {
+        &queue->read_bytes_count.metric,
+        &queue->reads_completed_count.metric,
+        &queue->written_bytes_count.metric,
+        &queue->writes_completed_count.metric
+    };
+
+    for (size_t i = 0; i < sizeof(metrics) / sizeof(metrics[0]); i++) {
+        metric_client_deregister(metric_client, metrics[i]);
+    }
+
+    return 0;
 }

@@ -51,7 +51,7 @@ int io_submit(io_context_t ctx, long nr, struct iocb *ios[]) {
     assert(iocb == NULL);
     iocb = ios[0];
     assert(iocb->aio_fildes == MOCK_BLKDEV_FD);
-    assert(iocb->aio_lio_opcode == IO_CMD_PWRITE);
+    assert(iocb->aio_lio_opcode == IO_CMD_PREAD);
     assert(iocb->aio_reqprio == 0);
     write(iocb->u.c.resfd, &(uint64_t){1}, sizeof(uint64_t));
     return 0;
@@ -63,7 +63,7 @@ int io_setup(int maxevents, io_context_t *ctxp) {
 
 int io_getevents(io_context_t ctx_id, long min_nr, long nr, struct io_event *events, struct timespec *timeout) {
     assert(min_nr == 1);
-    assert(nr == 128);
+    assert(nr == 256);
     events[0] = (struct io_event){
         .data = iocb->data,
         .obj = iocb,
@@ -80,24 +80,30 @@ int io_destroy(io_context_t ctx) {
     return 0;
 }
 
-int write_cb_called = 0;
-void write_cb(void *ctx, ssize_t res) {
+int read_cb_called = 0;
+void read_cb(void *ctx, ssize_t res) {
     assert(res == 4096);  
-    write_cb_called++;  
+    read_cb_called++;  
 }
 
 int main(void) {
-    bdev_t *bdev = aio_bdev_create("/dev/hda", 1, 128);
-    assert(bdev != NULL);
-    bdev_queue_t *queue = bdev_get_queue(bdev, 0);
-    assert(queue != NULL);
+    aio_bdev_t aio_bdev = {0};
+    assert(aio_bdev_init(&aio_bdev, "/dev/hda", 1, 256) == 0);
+    bdev_t bdev = {
+        .self = &aio_bdev,
+        .vtable = &aio_bdev_vtable,
+    };
+
+    assert(bdev.self != NULL);
+    bdev_queue_t queue = bdev_get_queue(bdev, 0);
+    assert(queue.self != NULL);
 
     char buf[4096] = {0};
-    bdev_queue_write(queue, buf, 4096, 8192, write_cb, NULL);
+    bdev_queue_read(queue, buf, 4096, 8192, read_cb, NULL);
     assert(bdev_queue_poll(queue) == 0);
-    assert(write_cb_called);
+    assert(read_cb_called);
 
-    aio_bdev_destroy(bdev);
+    aio_bdev_deinit(&aio_bdev);
     assert(io_destroy_called);
     assert(blkdev_fd_closed);
     assert(event_fd_closed);
