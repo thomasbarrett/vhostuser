@@ -232,7 +232,8 @@ int vhost_user_device_get_protocol_features(vhost_user_device_t *dev, vhost_user
                     1ULL << VHOST_USER_PROTOCOL_F_STATUS |
                     1ULL << VHOST_USER_PROTOCOL_F_INFLIGHT_SHMFD |
                     1ULL << VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS |
-                    1ULL << VHOST_USER_PROTOCOL_F_MQ;
+                    1ULL << VHOST_USER_PROTOCOL_F_MQ |
+                    1ULL << VHOST_USER_PROTOCOL_F_RESET_DEVICE;
 
     if (vhost_user_write(dev, &resp) < 0) {
         return -1;
@@ -339,7 +340,8 @@ int vhost_user_device_set_vring_num(vhost_user_device_t *dev, vhost_user_message
 int vhost_user_device_set_vring_base(vhost_user_device_t *dev, vhost_user_message_t *req) {
     size_t index = req->body.state.index;
     assert(index >= 0 && index < dev->queue_count);
-    // dev->queues[index].last_avail_idx = req->body.state.num;
+    // info("set vring base to %llx", req->body.state.num);
+    // dev->queues[index].inflight_state->last_avail_idx = req->body.state.num;
     return 0;
 }
 
@@ -398,11 +400,26 @@ int vhost_user_device_set_vring_kick(vhost_user_device_t *dev, vhost_user_messag
     return 0;
 }
 
+static int virt_queue_epoll_deregister_and_close(virt_queue_t *queue, int epollfd) {
+    virt_queue_epoll_deregister(queue, epollfd);
+    queue->state = QUEUE_STATE_STOPPED;
+    queue->inflight_state->last_avail_idx = 0;
+    for (size_t i = 0; i < queue->vring.num; i++) {
+        queue->inflight_state->desc[i].inflight = 0;
+    }
+    close(queue->call_eventfd);
+    queue->call_eventfd = -1;
+    close(queue->kick_eventfd);
+    queue->kick_eventfd = -1;
+    info("Reset virt-queue: %d", queue->index);
+}
+
 int vhost_user_device_get_vring_base(vhost_user_device_t *dev, vhost_user_message_t *req) {
     size_t index = req->body.state.index;
+    
     assert(index >= 0 && index < dev->queue_count);
 
-    if (task_queue_push(dev->task_queues[index % dev->task_queue_count], &dev->queues[index],  (int (*)(void *, int)) virt_queue_epoll_deregister) < 0) {
+    if (task_queue_push(dev->task_queues[index % dev->task_queue_count], &dev->queues[index],  (int (*)(void *, int)) virt_queue_epoll_deregister_and_close) < 0) {
         return -1;
     }
 
@@ -412,18 +429,7 @@ int vhost_user_device_get_vring_base(vhost_user_device_t *dev, vhost_user_messag
     resp.header.request = req->header.request;
     resp.body.state.index = index;
     resp.body.state.num = dev->queues[index].inflight_state->last_avail_idx;
-    dev->queues[index].state = QUEUE_STATE_STOPPED;
-    
-    if (dev->queues[index].call_eventfd != -1) {
-        close(dev->queues[index].call_eventfd);
-        dev->queues[index].call_eventfd = -1;
-    }
-
-    if (dev->queues[index].kick_eventfd != -1) {
-        close(dev->queues[index].kick_eventfd);
-        dev->queues[index].kick_eventfd = -1;
-    }
-
+  
     if (vhost_user_write(dev, &resp) < 0) {
         return -1;
     }
@@ -435,13 +441,7 @@ int vhost_user_device_set_vring_enable(vhost_user_device_t *dev, vhost_user_mess
     size_t index = req->body.state.index;
     assert(index >= 0 && index < dev->queue_count);
     virt_queue_t *queue = &dev->queues[index];
-    unsigned int state = req->body.state.num;
-    if (queue->state == QUEUE_STATE_STOPPED) {
-        error("failed to %s virt-queue: stopped", state ? "enable": "disable");
-        return -1;
-    }
-    info("set state: %d.%d", index, state);
-    dev->queues[index].state = state;
+    dev->queues[index].state = req->body.state.num;
     
     return 0;
 }
@@ -588,7 +588,7 @@ int vhost_user_device_handle(vhost_user_device_t *dev, vhost_user_message_t *msg
     }
 }
 
-int vhost_user_device_poll(vhost_user_device_t *dev, int _) {
+int vhost_user_device_poll(vhost_user_device_t *dev, int epollfd) {
     struct msghdr msg;
     struct iovec iov;
     struct cmsghdr *cmsg;
@@ -611,7 +611,29 @@ int vhost_user_device_poll(vhost_user_device_t *dev, int _) {
                 return 0;
             }
 
+            error("Failed to read from client fd");
             return -1;
+        }
+        if (nread == 0) {
+            if (epoll_ctl(epollfd, EPOLL_CTL_DEL, dev->client_fd, NULL) == -1) {
+                return -1;
+            }
+
+            struct epoll_event event = {0};
+            event.events = EPOLLIN;
+            event.data.ptr = &dev->accept_task;
+            if (epoll_ctl(epollfd, EPOLL_CTL_ADD, dev->sock_fd, &event) == -1) {
+                return -1;
+            }
+            
+            for (size_t index = 0; index < dev->queue_count; index++) {
+                if (task_queue_push(dev->task_queues[index % dev->task_queue_count], &dev->queues[index],  (int (*)(void *, int)) virt_queue_epoll_deregister_and_close) < 0) {
+                    return -1;
+                }
+            }
+           
+            info("Client closed");
+            return 0;
         }
         dev->read_state.buf_len += nread;
         if (cmsg->cmsg_type == SCM_RIGHTS) {
@@ -658,6 +680,10 @@ int vhost_user_accept(vhost_user_device_t *dev, int epollfd) {
         return -1;
     }
 
+    if (epoll_ctl(epollfd, EPOLL_CTL_DEL, dev->sock_fd, NULL) == -1) {
+        return -1;
+    }
+    
     return 0;
 }
 

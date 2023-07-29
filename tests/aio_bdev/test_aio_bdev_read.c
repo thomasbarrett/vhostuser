@@ -1,6 +1,6 @@
 // CFLAGS: -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=eventfd -Wl,--wrap=read
 #include <src/bdev.c>
-#include <src/queue.c>
+#include <src/bitmap.c>
 #include <src/log.c>
 
 #include <assert.h>
@@ -95,11 +95,11 @@ int main(void) {
     };
 
     assert(bdev.self != NULL);
-    bdev_queue_t queue = bdev_get_queue(bdev, 0);
+    bdev_queue_t queue = bdev_queue(bdev, 0);
     assert(queue.self != NULL);
 
     char buf[4096] = {0};
-    bdev_queue_read(queue, buf, 4096, 8192, read_cb, NULL);
+    bdev_queue_read(queue, 0, buf, 4096, 8192, read_cb, NULL);
     assert(bdev_queue_poll(queue) == 0);
     assert(read_cb_called);
 

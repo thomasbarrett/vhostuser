@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include <src/virtio-blk.c>
 #include <src/log.c>
+#include <src/bitmap.c>
 
 #include <assert.h>
 
@@ -41,7 +42,11 @@ typedef struct mock_bdev_queue {
     void *ctx;
 } mock_bdev_queue_t;
 
-void mock_bdev_queue_read(void *self, void *buf, size_t count, off_t offset, bdev_callback_t cb, void *ctx) {
+size_t mock_bdev_queue_nr_tags(void *self) {
+    return 128;
+}
+
+void mock_bdev_queue_read(void *self, uint16_t tag, void *buf, size_t count, off_t offset, bdev_callback_t cb, void *ctx) {
     mock_bdev_queue_t *queue = self;
     assert(count == 4096);
     assert(offset == 4096);
@@ -69,6 +74,7 @@ int __wrap_epoll_ctl(int epollfd, int op, int fd, struct epoll_event *event) {
 }
 
 bdev_queue_vtable_t mock_bdev_queue_vtable = {
+    .nr_tags = mock_bdev_queue_nr_tags,
     .read = mock_bdev_queue_read,
     .eventfd = mock_bdev_queue_eventfd,
     .poll = mock_bdev_queue_poll,

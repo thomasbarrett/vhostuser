@@ -4,11 +4,13 @@
 #include <virtio-core.h>
 #include <linux/virtio_blk.h>
 #include <bdev.h>
+#include <bitmap.h>
 
 #include <sys/uio.h>
 #include <stdatomic.h>
 
 struct virtio_blk_device;
+struct virtio_blk_io_ctx;
 
 typedef struct virtio_blk_queue {
     bdev_queue_t bdev_queue;
@@ -16,10 +18,15 @@ typedef struct virtio_blk_queue {
 
     struct virtio_blk_device *device;
 
+    bitmap_t tags; 
+    struct virtio_blk_io_ctx *io_ctx;
+
     /* metrics */
     metric_counter_t read_bytes_count;        /* number of bytes read */
+    metric_counter_t reads_submitted_count;   /* number of read ios submitted */
     metric_counter_t reads_completed_count;   /* number of read ios completed */  
     metric_counter_t written_bytes_count;     /* number of bytes written */
+    metric_counter_t writes_submitted_count;  /* number of write ios completed */  
     metric_counter_t writes_completed_count;  /* number of write ios completed */
 } virtio_blk_queue_t;
 

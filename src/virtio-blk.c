@@ -12,21 +12,38 @@
 #include <sys/epoll.h>
 #include <linux/virtio_blk.h>
 
+
+typedef struct virtio_blk_io_ctx {
+    virtio_blk_queue_t *queue;
+    uint16_t tag;
+    uint8_t *res;
+    uint32_t command;
+    task_t done_task;
+    size_t size;
+    size_t sector;
+} virtio_blk_io_ctx_t;
+
 int virtio_blk_device_init(virtio_blk_device_t *dev, bdev_t bdev) {
     memset(dev, 0, sizeof(virtio_blk_device_t));
+    
+    uint64_t size_bytes;
+    if (bdev_size(bdev, &size_bytes) < 0) {
+        return -1;
+    }
+
     dev->bdev = bdev;
     dev->queues = calloc(bdev_queue_count(bdev), sizeof(virtio_blk_queue_t));
     if (dev->queues == NULL) {
         goto error0;
     }
     for (size_t i = 0; i < bdev_queue_count(bdev); i++) {   
-        if (virtio_blk_queue_init(&dev->queues[i],  bdev_get_queue(bdev, i), dev, i) < 0) {
+        if (virtio_blk_queue_init(&dev->queues[i], bdev_queue(bdev, i), dev, i) < 0) {
             goto error1;
         }
         dev->queue_count++;
     }
 
-    dev->config.capacity = 1875385008;
+    dev->config.capacity = size_bytes >> 9;
     dev->config.num_queues = dev->queue_count;
     dev->config.size_max = 16384;
     dev->config.seg_max = 32;
@@ -100,6 +117,7 @@ virtio_device_queue_vtable_t virtio_blk_queue_vtable = {
 virtio_device_vtable_t virtio_blk_vtable = {
     .queue = (virtio_device_queue_t (*)(void*, int)) virtio_blk_device_queue,
     .queue_count = (int (*)(void*)) virtio_blk_device_queue_count,
+    .get_features = (uint64_t (*)(void *)) virtio_blk_device_get_features,
     .config_read = (ssize_t (*)(void*, void*, size_t, off_t)) virtio_blk_device_config_read,
 };
 
@@ -111,28 +129,40 @@ int virtio_blk_queue_init(virtio_blk_queue_t *queue, bdev_queue_t bdev_queue, vi
         .call = (int (*)(void*, int))(virtio_blk_queue_poll),
     };
     queue->device = dev;
+    
+    int res = bitmap_init(&queue->tags, bdev_queue_nr_tags(bdev_queue));
+    if (res < 0) {
+        goto error0;
+    }
+
+    queue->io_ctx = calloc(bdev_queue_nr_tags(bdev_queue), sizeof(virtio_blk_io_ctx_t));
+    if (queue->io_ctx == NULL) {
+        goto error1;
+    }
 
     metric_label_t label = {0};
     strcpy(label.key, "queue");
     snprintf(label.val, METRICS_MAX_LABEL_VAL_SIZE, "%d", i);
     metric_counter_init(&queue->read_bytes_count, "virtio_blk_read_bytes", &label, 1);
+    metric_counter_init(&queue->reads_submitted_count, "virtio_blk_reads_submitted", &label, 1);
     metric_counter_init(&queue->reads_completed_count, "virtio_blk_reads_completed", &label, 1);
     metric_counter_init(&queue->written_bytes_count, "virtio_blk_written_bytes", &label, 1);
+    metric_counter_init(&queue->writes_submitted_count, "virtio_blk_writes_submitted", &label, 1);
     metric_counter_init(&queue->writes_completed_count, "virtio_blk_writes_completed", &label, 1);
 
     return 0;
+
+error1:
+    bitmap_deinit(&queue->tags);
+error0:
+    return -1;
 }
 
-void virtio_blk_queue_deinit(virtio_blk_queue_t *self) {}
+void virtio_blk_queue_deinit(virtio_blk_queue_t *queue) {
+    free(queue->io_ctx);
+    bitmap_deinit(&queue->tags);
+}
 
-typedef struct virtio_blk_io_ctx {
-    virtio_blk_queue_t *queue;
-    uint8_t *res;
-    uint32_t command;
-    task_t done_task;
-    size_t size;
-    size_t sector;
-} virtio_blk_io_ctx_t;
 
 void virtio_blk_io_cb(void *ctx, ssize_t res) {
     virtio_blk_io_ctx_t *io_ctx = (virtio_blk_io_ctx_t*) ctx;
@@ -152,7 +182,7 @@ void virtio_blk_io_cb(void *ctx, ssize_t res) {
         *(io_ctx->res) = VIRTIO_BLK_S_IOERR;
     }
     io_ctx->done_task.call(io_ctx->done_task.self, -1);
-    free(io_ctx);
+    bitmap_remove(&io_ctx->queue->tags, io_ctx->tag);
 }
 
 static size_t get_iov_len(struct iovec *iov, size_t iov_len) {
@@ -171,17 +201,26 @@ void virtio_blk_handle_req(virtio_blk_queue_t *queue, struct virtio_blk_outhdr *
         {
             if (iovcnt == 1 && !bdev_queue.vtable->read) break;
             if (iovcnt > 1 && !bdev_queue.vtable->readv) break;
-            virtio_blk_io_ctx_t *io_ctx = calloc(1, sizeof(virtio_blk_io_ctx_t));
+            int32_t tag = bitmap_find(&queue->tags, 0, 0);
+            if (tag < 0) {
+                error("Failed to find free tag");
+                goto error;
+            }
+            bitmap_add(&queue->tags, tag);
+
+            virtio_blk_io_ctx_t *io_ctx = &queue->io_ctx[tag];
+            io_ctx->tag = tag;
             io_ctx->queue = queue;
             io_ctx->res = res;
             io_ctx->command = hdr->type;
             io_ctx->done_task = done_task;
             io_ctx->size = get_iov_len(iov, iovcnt);
             io_ctx->sector = hdr->sector;
+            metric_counter_inc(&io_ctx->queue->reads_submitted_count, 1);
             if (iovcnt == 1) {
-                bdev_queue_read(bdev_queue, iov[0].iov_base, iov[0].iov_len, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
+                bdev_queue_read(bdev_queue, tag, iov[0].iov_base, iov[0].iov_len, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
             } else {
-                bdev_queue_readv(bdev_queue, iov, iovcnt, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
+                bdev_queue_readv(bdev_queue, tag, iov, iovcnt, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
             }
             return;
         }
@@ -189,31 +228,48 @@ void virtio_blk_handle_req(virtio_blk_queue_t *queue, struct virtio_blk_outhdr *
         {
             if (iovcnt == 1 && !bdev_queue.vtable->write) break;
             if (iovcnt > 1 && !bdev_queue.vtable->writev) break;
-            virtio_blk_io_ctx_t *io_ctx = calloc(1, sizeof(virtio_blk_io_ctx_t));
+            int32_t tag = bitmap_find(&queue->tags, 0, 0);
+            if (tag < 0) {
+                error("Failed to find free tag");
+                goto error;
+            }
+            bitmap_add(&queue->tags, tag);
+
+            virtio_blk_io_ctx_t *io_ctx = &queue->io_ctx[tag];
+            io_ctx->tag = tag;
             io_ctx->queue = queue;
             io_ctx->res = res;
             io_ctx->command = hdr->type;
             io_ctx->done_task = done_task;
             io_ctx->size = get_iov_len(iov, iovcnt);
             io_ctx->sector = hdr->sector;
+            metric_counter_inc(&io_ctx->queue->writes_submitted_count, 1);
             if (iovcnt == 1) {
-                bdev_queue_write(bdev_queue, iov[0].iov_base, iov[0].iov_len, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
+                bdev_queue_write(bdev_queue, tag, iov[0].iov_base, iov[0].iov_len, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
             } else {
-                bdev_queue_writev(bdev_queue, iov, iovcnt, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
+                bdev_queue_writev(bdev_queue, tag, iov, iovcnt, hdr->sector << 9, virtio_blk_io_cb, io_ctx);
             }
             return;
         }
     case VIRTIO_BLK_T_FLUSH:
         {
             if (!bdev_queue.vtable->flush) break;
-            virtio_blk_io_ctx_t *io_ctx = calloc(1, sizeof(virtio_blk_io_ctx_t));
+            int32_t tag = bitmap_find(&queue->tags, 0, 0);
+            if (tag < 0) {
+                error("Failed to find free tag");
+                goto error;
+            }
+            bitmap_add(&queue->tags, tag);
+            
+            virtio_blk_io_ctx_t *io_ctx = &queue->io_ctx[tag];
+            io_ctx->tag = tag;
             io_ctx->queue = queue;
             io_ctx->res = res;
             io_ctx->command = hdr->type;
             io_ctx->done_task = done_task;
             io_ctx->size = 0;
             io_ctx->sector = hdr->sector;
-            bdev_queue_flush(bdev_queue, virtio_blk_io_cb, io_ctx);
+            bdev_queue_flush(bdev_queue, tag, virtio_blk_io_cb, io_ctx);
             return;
         }
     case VIRTIO_BLK_T_GET_ID:
@@ -223,7 +279,13 @@ void virtio_blk_handle_req(virtio_blk_queue_t *queue, struct virtio_blk_outhdr *
         return;       
     }
 
+    error("Received unsupported virtio_blk io type: %d", hdr->type);
     *res = VIRTIO_BLK_S_UNSUPP;
+    done_task.call(done_task.self, -1);
+
+    return;
+error:
+    *res = VIRTIO_BLK_S_IOERR;
     done_task.call(done_task.self, -1);
 }
 
@@ -303,8 +365,10 @@ int virtio_blk_queue_handle(virtio_blk_queue_t *queue, struct iovec *iov, size_t
 int virtio_blk_queue_metrics_register(virtio_blk_queue_t *queue, metric_client_t *metric_client) {
     metric_t *metrics[] = {
         &queue->read_bytes_count.metric,
+        &queue->reads_submitted_count.metric,
         &queue->reads_completed_count.metric,
         &queue->written_bytes_count.metric,
+        &queue->writes_submitted_count.metric,
         &queue->writes_completed_count.metric
     };
 
@@ -318,8 +382,10 @@ int virtio_blk_queue_metrics_register(virtio_blk_queue_t *queue, metric_client_t
 int virtio_blk_queue_metrics_deregister(virtio_blk_queue_t *queue, metric_client_t *metric_client) {
      metric_t *metrics[] = {
         &queue->read_bytes_count.metric,
+        &queue->reads_submitted_count.metric,
         &queue->reads_completed_count.metric,
         &queue->written_bytes_count.metric,
+        &queue->writes_submitted_count.metric,
         &queue->writes_completed_count.metric
     };
 

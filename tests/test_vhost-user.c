@@ -3,6 +3,7 @@
 #include <src/virtio-core.c>
 #include <src/log.c>
 #include <src/task.c>
+#include <src/bitmap.c>
 #include <src/virtio-blk.c>
 #include <src/metrics.c>
 #include <src/http.c>

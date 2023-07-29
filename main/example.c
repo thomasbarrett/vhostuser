@@ -26,9 +26,6 @@ typedef struct io_thread_ctx {
     task_queue_t task_queue;
 } io_thread_ctx_t;
 
-io_thread_ctx_t io_thread_ctx[DEVICE_QUEUE_COUNT_MAX];
-task_queue_t *task_queues[DEVICE_QUEUE_COUNT_MAX];
-
 static volatile int done = 0;
 
 void handle_sigint(int signal) {
@@ -73,6 +70,10 @@ void* io_thread_run(void *arg) {
 
 int main(void) {
 
+
+    io_thread_ctx_t io_thread_ctx[DEVICE_QUEUE_COUNT_MAX];
+    task_queue_t *task_queues[DEVICE_QUEUE_COUNT_MAX];
+
     const int thread_count = 4;
     for (size_t i = 0; i < thread_count; i++) {
         io_thread_ctx[i].index = i;
@@ -95,7 +96,7 @@ int main(void) {
     }
 
     aio_bdev_t aio_bdev;
-    int res = aio_bdev_init(&aio_bdev, "/dev/nvme1n1", 4, 128);
+    int res = aio_bdev_init(&aio_bdev, "/dev/nvme3n1", 4, 128);
     if (res < 0) {
         return -1;
     }
@@ -113,7 +114,6 @@ int main(void) {
 
     signal(SIGINT, handle_sigint);
 
- 
     virtio_device_t device = (virtio_device_t){
         .self = &virtio_blk_device,
         .vtable = &virtio_blk_vtable,
@@ -167,14 +167,65 @@ int main(void) {
     }
 
     vhost_user_device_deinit(&vhost_user_device);
-
     virtio_blk_device_metrics_deregister(&virtio_blk_device, &metric_client);
-
     virtio_blk_device_deinit(&virtio_blk_device);
-
     aio_bdev_deinit(&aio_bdev);
     
     metric_client_deinit(&metric_client);
 
 	return 0;
 }
+
+// typedef struct device {
+//     aio_bdev_t aio_bdev;
+//     virtio_blk_device_t virtio_blk_device;
+//     vhost_user_device_t vhost_user_device;
+// } device_t;
+
+// #define APPLICATION_DEVICE_COUNT_MAX 16
+// #define APPLICATION_IO_THREAD_COUNT_MAX 16
+
+// typedef struct application {
+//     io_thread_ctx_t io_thread_ctx[APPLICATION_IO_THREAD_COUNT_MAX];
+//     size_t io_thread_count;
+    
+//     task_queue_t *io_thread_task_queues[APPLICATION_IO_THREAD_COUNT_MAX];
+
+//     int epollfd;
+//     metric_client_t metric_client;
+//     device_t *devices[APPLICATION_DEVICE_COUNT_MAX];
+//     size_t device_count;
+// } application_t;
+
+// int device_init(device_t *device, metric_client_t *metric_client, task_queue_t *task_queues, size_t io_thread_count, const char *path) {
+//     if (aio_bdev_init(&device->aio_bdev, path, io_thread_count, 128) < 0) {
+//         goto error0;
+//     }
+
+//     if (virtio_blk_device_init(&device->virtio_blk_device, (bdev_t) {
+//         .self = &device->aio_bdev,
+//         .vtable = &aio_bdev_vtable,
+//     }) < 0) {
+//         goto error1;
+//     }
+
+//     if (vhost_user_device_init(&device->vhost_user_device, &metric_client, SERVER_SOCK_FILE, (virtio_device_t) {
+//         .self = &device->virtio_blk_device,
+//         .vtable = &virtio_blk_vtable,
+//     }, 128, task_queues, io_thread_count) < 0) {
+//         goto error2;
+//     }
+
+// error2:
+//     virtio_blk_device_deinit(&device->virtio_blk_device);
+// error1:
+//     aio_bdev_deinit(&device->aio_bdev);
+// error0:
+//     return -1;
+// }
+
+// int device_deinit(device_t *device) {
+//     vhost_user_device_deinit(&device->vhost_user_device);
+//     virtio_blk_device_deinit(&device->virtio_blk_device);
+//     aio_bdev_deinit(&device->aio_bdev);
+// }
